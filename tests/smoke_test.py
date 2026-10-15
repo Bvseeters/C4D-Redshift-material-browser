@@ -7,8 +7,15 @@ bitmap loader refuses WebP, like Cinema 4D). Live network. Checks:
   * Everything: every site in one list, sites mixed near the top, merged categories,
     one search across all sites; ticking sites off and on (Ctrl-click: only that
     one) changes both the results and the merged categories
-  * endless scrolling: more tiles arrive as the view nears the end
-  * Ctrl + mouse wheel and the Size slider resize the tiles (one step per notch)
+  * settings from an older version: displacement turned on, resolution Highest
+  * the grid scrolls itself (wheel, scroll bar, Page/Home/End) over the whole list,
+    fetching thumbnails only for the tiles in or near view
+  * Ctrl + mouse wheel and the Size slider resize the tiles (one step per notch),
+    Ctrl read from the event or, failing that, from the keyboard
+  * Up / Down step through the categories (wrapping), from the sidebar, the grid
+    or the dialog, one step per key press
+  * the Resolution menu lists only the sizes a site offers, Highest first; each
+    material downloads at the size it really has and is named after it
   * per site: categories arrive, filtering by one works, thumbnails load in a format
     C4D reads (including repairing a WebP thumbnail an old version cached), a
     double-clicked material downloads and becomes a correctly wired Redshift
@@ -40,8 +47,8 @@ import maxon    # noqa: E402
 
 LIB = tempfile.mkdtemp(prefix="baspbr_lib_")
 with open(os.path.join(c4d.storage.PREFS, "baspbr_browser.json"), "w") as f:
-    json.dump({"library": LIB, "resolution": "1K", "source": "everything", "query": "",
-               "assign": True, "displacement": True}, f)
+    json.dump({"library": LIB, "resolution": "1K", "source": "everything", "query": "",   # a 3.1 settings file
+               "assign": True, "displacement": False}, f)
 
 failures = []
 
@@ -84,6 +91,11 @@ dlg.CreateLayout()
 dlg.InitValues()
 check([t[1] for t in dlg.tabs.tabs] == ["Everything", "ambientCG", "Poly Haven", "ShareTextures", "AMD GPUOpen",
                                        "FreePBR", "Installed"], "tabs: Everything, 5 sites, Installed")
+
+
+print("\nsettings from 3.1:")
+check(dlg.GetBool(ui.ID_DISP) and dlg.options().displacement, "displacement is on")
+check(dlg.resolution == sources.HIGHEST and dlg.res_options[0] == sources.HIGHEST, "resolution: Highest")
 
 
 def pump(until, timeout=60):
@@ -164,6 +176,15 @@ def check_material(graph, mat):
     check(any(t.get(c4d.TEXTURETAG_MATERIAL) is mat for t in tags), "assigned to the selected objects")
 
 
+def key(k, where="dialog"):
+    if where == "dialog":
+        bc = c4d.BaseContainer(c4d.BFM_INPUT)
+        bc.update({c4d.BFM_INPUT_DEVICE: c4d.BFM_INPUT_KEYBOARD, c4d.BFM_INPUT_CHANNEL: k})
+        return dlg.Message(bc, None)
+    msg = {c4d.BFM_INPUT_DEVICE: c4d.BFM_INPUT_KEYBOARD, c4d.BFM_INPUT_CHANNEL: k, c4d.BFM_INPUT_QUALIFIER: 0}
+    return (dlg.cats if where == "sidebar" else dlg.grid).InputEvent(msg)
+
+
 def thumbs_shown(n=6):
     return sum(1 for a in dlg.grid.items[:30] if a.key in ui._bitmaps) >= min(n, len(dlg.grid.items))
 
@@ -182,14 +203,38 @@ check([t[1] for t in dlg.cats.toggles] == ["ambientCG", "Poly Haven", "ShareText
 check(pump(lambda: thumbs_shown(), 60), "thumbnails load (all sites, C4D-readable)")
 check(not c4d.bitmaps.REJECTED, "no thumbnail C4D couldn't read")
 
-print("\nendless scrolling:")
-first = len(dlg.grid.items)
-check(first == ui.CHUNK and first < len(dlg.results), "starts with %d tiles of %d" % (first, len(dlg.results)))
-pump(lambda: False, 0.3)
-check(len(dlg.grid.items) == first, "nothing more while the view is at the top")
-dlg.visible = {"x1": 0, "y1": dlg.grid.content_height() - 600, "x2": 700, "y2": dlg.grid.content_height()}
-check(pump(lambda: len(dlg.grid.items) > first, 5), "scrolled to the end: %d more tiles arrive" % (len(dlg.grid.items) - first))
-check(dlg.GetString(ui.ID_COUNT).startswith("%d materials" % len(dlg.results)), "count: '%s'" % dlg.GetString(ui.ID_COUNT))
+print("\nscrolling:")
+g = dlg.grid
+keys = {a.key for a in dlg.results}
+check(len(g.items) == len(dlg.results) and g.scroll == 0, "the whole list is in the grid: %d tiles" % len(g.items))
+check(g.content_height() > 100000, "%d px tall - drawn a screen at a time" % g.content_height())
+asked = keys & dlg.jobs._thumb_seen
+per_screen = g.cols * (g._h() // g.cell_h + 2)
+check(0 < len(asked) <= 2 * per_screen, "thumbnails asked for the tiles in or near view only: %d" % len(asked))
+check(dlg.GetString(ui.ID_COUNT) == "%d materials" % len(dlg.results), "count: '%s'" % dlg.GetString(ui.ID_COUNT))
+check(wheel(-120, ctrl=False) and g.scroll > 0 and g.tile == 128, "mouse wheel down scrolls %d px" % g.scroll)
+wheel(120, ctrl=False)
+check(g.scroll == 0, "and back up")
+key(c4d.KEY_PGDOWN, "grid")
+check(g.scroll == g._h() - g.cell_h, "Page Down: %d px" % g.scroll)
+key(c4d.KEY_END, "grid")
+check(g.scroll == g.max_scroll(), "End: the bottom (%d px)" % g.scroll)
+last = g.items[-1]
+check(pump(lambda: last.key in ui._bitmaps, 30), "the last tile's thumbnail arrives")
+key(c4d.KEY_HOME, "grid")
+check(g.scroll == 0, "Home: the top")
+top, thumb = g._bar()
+c4d.gui.DRAG_SCRIPT[:] = [(c4d.MOUSEDRAGRESULT_CONTINUE, 0, 40), (c4d.MOUSEDRAGRESULT_CONTINUE, 0, 60)]
+bar_click = {c4d.BFM_INPUT_DEVICE: c4d.BFM_INPUT_MOUSE, c4d.BFM_INPUT_CHANNEL: c4d.BFM_INPUT_MOUSELEFT,
+             c4d.BFM_INPUT_X: g._w() - 5, c4d.BFM_INPUT_Y: top + 5, c4d.BFM_INPUT_QUALIFIER: 0}
+g.InputEvent(bar_click)
+expect = int(100 * g.max_scroll() / float(g._h() - thumb))
+check(abs(g.scroll - expect) <= 1, "dragging the scroll bar 100 px: %d px down the list" % g.scroll)
+g.scroll_to(0)
+bar_click[c4d.BFM_INPUT_Y] = g._h() - 5
+g.InputEvent(bar_click)
+check(g.scroll == g._h() - g.cell_h, "a click in the track below: a page down")
+g.scroll_to(0)
 
 print("\nthumbnail size:")
 t = dlg.grid.tile
@@ -202,7 +247,14 @@ bc.update({c4d.BFM_INPUT_CHANNEL: c4d.BFM_INPUT_MOUSEWHEEL, c4d.BFM_INPUT_QUALIF
 wheel(-120)
 dlg.Message(bc, None)                     # the same notch reaching the dialog too
 check(dlg.grid.tile == t, "one notch down seen by grid and dialog: one step (%d px)" % dlg.grid.tile)
-check(wheel(120, ctrl=False) is False and dlg.grid.tile == t, "a plain wheel scrolls instead")
+check(wheel(-120, ctrl=False) and dlg.grid.tile == t and dlg.grid.scroll > 0, "a plain wheel scrolls instead")
+dlg.grid.scroll_to(0)
+time.sleep(0.02)
+c4d.gui.CTRL_HELD[0] = True
+wheel(120, ctrl=False)
+c4d.gui.CTRL_HELD[0] = False
+check(dlg.grid.tile == t + ui.TILE_STEP, "Ctrl seen on the keyboard when the event doesn't carry it")
+dlg.set_tile_size(t)
 dlg.SetInt32(ui.ID_SIZE, 300)
 dlg.Command(ui.ID_SIZE, None)
 check(dlg.grid.tile == 300 and dlg.grid.cols == 2, "Size slider: 300 px, %d columns" % dlg.grid.cols)
@@ -211,6 +263,85 @@ for _ in range(30):
     wheel(-120)
 check(dlg.grid.tile == ui.TILE_MIN, "never smaller than %d px" % ui.TILE_MIN)
 dlg.set_tile_size(128)
+
+print("\narrow keys:")
+rows = [r[0] for r in dlg.cats.rows]
+check(dlg.cats.selected == sources.ALL, "starts on All")
+key(c4d.KEY_DOWN)
+check(dlg.cats.selected == rows[1] and dlg.category == rows[1], "Down (dialog): %s" % rows[1])
+check(pump(lambda: searched() and all(rows[1] in a.extra["canon"] for a in dlg.results), 5),
+      "the results follow once the key rests: %d" % len(dlg.results))
+time.sleep(0.02)
+key(c4d.KEY_DOWN, "sidebar")
+key(c4d.KEY_DOWN)                          # the same press reaching the dialog too
+check(dlg.cats.selected == rows[2], "Down in the sidebar: %s (one step, not two)" % dlg.cats.selected)
+time.sleep(0.02)
+key(c4d.KEY_DOWN, "grid")
+check(dlg.cats.selected == rows[3], "Down with the grid focused: %s" % dlg.cats.selected)
+for _ in range(3):
+    time.sleep(0.02)
+    key(c4d.KEY_UP)
+check(dlg.cats.selected == sources.ALL, "Up x3: back on All")
+time.sleep(0.02)
+key(c4d.KEY_UP)
+check(dlg.cats.selected == rows[-1], "Up from All wraps to the last: %s" % rows[-1])
+time.sleep(0.02)
+key(c4d.KEY_DOWN)
+check(dlg.cats.selected == sources.ALL, "and Down wraps back to All")
+pump(searched, 10)
+
+print("\nresolutions:")
+ph = sources.SOURCES["polyhaven"]
+a8 = next(a for a in ph.catalogue() if a.max_res == "8K")
+a16 = next(a for a in ph.catalogue() if a.max_res == "16K")
+check(ph.available(a8)[-1] == "8K" and ph.available(a16)[-1] == "16K", "Poly Haven per material: %s has %s, %s has %s"
+      % (a8.id, ph.available(a8), a16.id, ph.available(a16)))
+check(sources.choose_res(ph.available(a8), "16K") == "8K" and sources.choose_res(ph.available(a8), sources.HIGHEST) == "8K",
+      "asking 16K or Highest of an 8K material gets 8K")
+check(sources.choose_res(["1K", "2K", "4K"], "2K") == "2K" and sources.choose_res(["4K", "8K"], "2K") == "4K",
+      "a size it has is used as is; below its smallest, its smallest")
+EXPECT = {"ambientcg": ["Highest", "16K", "12K", "8K", "4K", "2K", "1K"],
+          "polyhaven": ["Highest", "16K", "8K", "4K", "2K", "1K"],
+          "sharetextures": ["Highest", "4K", "2K", "1K"], "amd": ["Highest", "8K", "4K", "2K", "1K"],
+          "freepbr": ["2K"], "installed": []}
+for tid, want in EXPECT.items():
+    switch(tid)
+    check(dlg.res_options == want and dlg.enabled.get(ui.ID_RES) == (len(want) > 1),
+          "%s menu: %s" % (tid, dlg.res_options or "(off)"))
+switch("everything")
+check(dlg.res_options == EXPECT["ambientcg"], "Everything: every size any ticked site has")
+click_site("ambientcg")
+click_site("polyhaven")
+check(dlg.res_options == ["Highest", "8K", "4K", "2K", "1K"], "without ambientCG and Poly Haven: %s" % dlg.res_options)
+click_site("ambientcg")
+click_site("polyhaven")
+pump(searched, 20)
+
+# the size decides the library folder and the material's name (fake site: no big downloads)
+amd = sources.SOURCES["amd"]
+fake = sources.Asset("amd", "fake-material", "Fake Material", max_res="")
+real_available, real_download = sources.AMDMatLib.available, sources.AMDMatLib.download
+asked_for = []
+
+
+def fake_download(self, asset, res, work, progress, cancel):
+    asked_for.append(res)
+    path = os.path.join(work, "fake_basecolor.jpg")
+    with open(path, "wb") as f:
+        f.write(b"\xff\xd8\xff\xe0" + b"0" * 64)
+    return {"color": path}
+
+
+sources.AMDMatLib.available = lambda self, asset: ["1K", "2K"]
+sources.AMDMatLib.download = fake_download
+folder = sources.fetch(libmod.Library(LIB), fake, sources.HIGHEST)[0]
+check(asked_for == ["2K"] and os.path.basename(folder) == libmod.safe_name(fake.name) + "_2K", "Highest of a 1K/2K material: 2K, folder %s" % os.path.basename(folder))
+folder, maps, reused = sources.fetch(libmod.Library(LIB), fake, "8K")
+check(reused and asked_for == ["2K"], "asking 8K of it reuses the 2K already in the library")
+folder = sources.fetch(libmod.Library(LIB), fake, "1K")[0]
+check(asked_for == ["2K", "1K"] and folder.endswith("_1K"), "asking 1K downloads 1K")
+sources.AMDMatLib.available, sources.AMDMatLib.download = real_available, real_download
+shutil.rmtree(os.path.join(LIB, "AMD GPUOpen"), ignore_errors=True)
 
 print("\nsearch and categories across sites:")
 dlg.SetString(ui.ID_QUERY, "marble")
@@ -272,8 +403,14 @@ for sid in sources.ONLINE:
     check(in_cat, "every result is in that category")
     pump(lambda: thumbs_shown(), 40)
     check(thumbs_shown(), "thumbnails load in a C4D-readable format")
+    if "1K" in dlg.res_options:
+        dlg.SetInt32(ui.ID_RES, dlg.res_options.index("1K"))
+        dlg.Command(ui.ID_RES, None)
     before = len(maxon.GRAPHS)
     click(0)
+    pump(lambda: dlg.grid.items[0].key in dlg.sizes, 20)
+    check(("2K only" if sid == "freepbr" else "downloads 1K") in dlg.GetString(ui.ID_STATUS),
+          "selected: '%s'" % dlg.GetString(ui.ID_STATUS))
     click(0, double=True)
     asset = dlg.grid.items[0]
     pump(lambda: len(maxon.GRAPHS) > before or dlg.state.get(asset.key) == "error", 300)
@@ -281,6 +418,8 @@ for sid in sources.ONLINE:
     if len(maxon.GRAPHS) > before:
         check_material(maxon.GRAPHS[-1], c4d.documents.DOC.materials[-1])
         downloaded.append(asset)
+        name = c4d.documents.DOC.materials[-1].name
+        check(name.endswith(" 2K" if sid == "freepbr" else " 1K"), "named after the size it has: '%s'" % name)
         if sid == "amd":            # some AMD materials pack AO / roughness / metalness into one map
             palm = next(a for a in sources.SOURCES["amd"].catalogue() if a.name == "Indigo Palm Wallpaper")
             maps = sources.fetch(libmod.Library(LIB), palm, "1K")[1]

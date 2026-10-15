@@ -7,9 +7,9 @@ DEFAULTS = {
     "source": "everything",
     "query": "",
     "sort": {},                 # per source
-    "resolution": "4K",
+    "res": {},                  # per tab: "Highest" (the default) or a size such as "4K"
     "assign": True,
-    "displacement": False,
+    "displacement": True,
     "displacement_scale": 1.0,
     "bump_from_height": True,
     "category": {},             # per tab
@@ -32,6 +32,9 @@ def _path(name=FILE):
     return os.path.join(folder, name)
 
 
+VERSION = 2       # 2 (BasPBR Browser 3.2): displacement on, and the highest resolution, by default
+
+
 def load():
     data = dict(DEFAULTS)
     for path in (_path(), _path(LEGACY)):    # older settings carry over on first run
@@ -41,6 +44,11 @@ def load():
             break
         except Exception:
             continue
+    if data.get("settings_version", 1) < 2:
+        data["displacement"] = True
+        data["res"] = {}
+        data.pop("resolution", None)
+    data["settings_version"] = VERSION
     return data
 
 

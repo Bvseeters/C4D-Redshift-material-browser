@@ -36,7 +36,8 @@ from datetime import datetime
 from . import net
 from .library import classify, image_kind, local_cache_dir, pick_maps
 
-RESOLUTIONS = ("1K", "2K", "4K", "8K")
+RESOLUTIONS = ("1K", "2K", "4K", "8K", "12K", "16K")     # every size any site offers
+HIGHEST = "Highest"           # the largest size each material comes in
 ALL = ""                       # the "All" category
 CACHE_TTL = 12 * 3600          # catalogues are re-read from the sites twice a day
 
@@ -83,6 +84,31 @@ class Asset(object):
 def _res_value(r):
     m = re.match(r"(\d+)", r or "")
     return int(m.group(1)) if m else 0
+
+
+def _res_label(text):
+    """'8K-JPG', '8k', '8k 8b' -> '8K' (None if it isn't a size)."""
+    m = re.match(r"\s*(\d+)\s*k", text or "", re.I)
+    return "%dK" % int(m.group(1)) if m else None
+
+
+def choose_res(available, wanted):
+    """The size to download: Highest = the largest the material comes in; otherwise
+    the one asked for, or the largest below it, or (nothing below) the smallest."""
+    avail = sorted(set(r for r in available if r), key=_res_value)
+    if not avail:
+        return None
+    if not wanted or wanted == HIGHEST:
+        return avail[-1]
+    below = [r for r in avail if _res_value(r) <= _res_value(wanted)]
+    return below[-1] if below else avail[0]
+
+
+def floor_res(pixels, ladder):
+    """A pixel width as the largest size on the ladder that fits (9216 px -> 8K)."""
+    k = (pixels or 0) / 1024.0
+    fits = [r for r in ladder if _res_value(r) <= k + 0.01]
+    return fits[-1] if fits else ""
 
 
 def _timestamp(value):
@@ -168,12 +194,19 @@ class Source(object):
     label = ""
     licence = ""
     sorts = ("Name",)
+    resolutions = ("1K", "2K", "4K", "8K")     # what this site offers (the Resolution menu)
     fixed_resolution = ""      # set when the source offers one resolution only
-    best_resolution = "8K"
 
     def __init__(self):
         self._all = None
         self._lock = threading.Lock()
+        self._detail = {}      # asset id -> what the site says about its files (asked once)
+
+    def available(self, asset):
+        """The sizes this material really comes in, smallest first. May ask the site
+        (worker threads only); remembered for the session."""
+        top = asset.max_res or self.resolutions[-1]
+        return [r for r in self.resolutions if _res_value(r) <= _res_value(top)]
 
     # ---- the catalogue -------------------------------------------------------------------
     def fetch_catalogue(self):
@@ -265,6 +298,7 @@ class AmbientCG(Source):
     label = "ambientCG"
     licence = "CC0 (public domain)"
     sorts = ("Popular", "Latest", "Name")
+    resolutions = ("1K", "2K", "4K", "8K", "12K", "16K")
     API = "https://ambientcg.com/api/v2/"
 
     def fetch_catalogue(self):
@@ -280,7 +314,7 @@ class AmbientCG(Source):
             cat = a.get("displayCategory") or a.get("category")
             out.append(Asset(self.id, aid, a.get("displayName") or aid, thumb,
                              tags=a.get("tags") or [], categories=[cat] if cat else [],
-                             page_url="https://ambientcg.com/view?id=" + aid, max_res="8K",
+                             page_url="https://ambientcg.com/view?id=" + aid, max_res="",   # 2K-16K: asked per material
                              extra={"pop": float(a.get("popularityScore") or a.get("downloadCount") or 0),
                                     "date": _timestamp(a.get("releaseDate"))}))
         if not out:
@@ -288,6 +322,8 @@ class AmbientCG(Source):
         return out
 
     def downloads(self, asset_id):
+        if asset_id in self._detail:
+            return self._detail[asset_id]
         data = net.get_json(self.API + "full_json?id=%s&include=downloadData" % urllib.parse.quote(asset_id))
         out = []
         for a in data.get("foundAssets", []):
@@ -298,13 +334,19 @@ class AmbientCG(Source):
                                     "size": d.get("size", 0)})
             except (KeyError, TypeError):
                 pass
+        self._detail[asset_id] = out
         return out
+
+    def available(self, asset):
+        return sorted({_res_label(d["attribute"]) for d in self.downloads(asset.id)} - {None}, key=_res_value)
 
     @staticmethod
     def pick(downloads, res):
         """The zip for res (JPG preferred), else the largest smaller one, else the smallest."""
         want = _res_value(res)
-        jpg = [d for d in downloads if d["attribute"].upper().endswith("-JPG")] or downloads
+        sized = [d for d in downloads if _res_label(d["attribute"])]
+        jpg = ([d for d in sized if d["attribute"].upper().endswith("-JPG")] or
+               [d for d in sized if _res_value(d["attribute"]) == want] or sized or downloads)
         jpg = sorted(jpg, key=lambda d: _res_value(d["attribute"]), reverse=True)
         for d in jpg:
             if _res_value(d["attribute"]) <= want:
@@ -312,7 +354,7 @@ class AmbientCG(Source):
         return jpg[-1] if jpg else None
 
     def download(self, asset, res, work, progress, cancel):
-        dl = self.pick(asset.extra.get("downloads") or self.downloads(asset.id), res)
+        dl = self.pick(self.downloads(asset.id), res)
         if not dl:
             raise RuntimeError("no downloads listed for " + asset.id)
         zpath = os.path.join(work, "download.zip")
@@ -326,6 +368,7 @@ class PolyHaven(Source):
     label = "Poly Haven"
     licence = "CC0 (public domain)"
     sorts = ("Popular", "Newest", "Name")
+    resolutions = ("1K", "2K", "4K", "8K", "16K")
     API = "https://api.polyhaven.com"
     # Poly Haven file keys -> our roles. OpenGL normals (Redshift's convention).
     MAPS = (("Diffuse", "color"), ("nor_gl", "normal_gl"), ("Rough", "roughness"), ("metal", "metalness"),
@@ -349,14 +392,23 @@ class PolyHaven(Source):
             out.append(Asset(self.id, aid, a.get("name") or aid, self.png_thumb(a.get("thumbnail_url"), aid),
                              tags=a.get("tags") or [], categories=a.get("categories") or [],
                              page_url="https://polyhaven.com/a/" + aid,
-                             max_res="%dK" % (int(mr[0]) // 1024) if mr and mr[0] else "",
+                             max_res=floor_res(mr[0] if mr else 0, self.resolutions),
                              extra={"pop": float(a.get("download_count") or 0),
                                     "date": _timestamp(a.get("date_published"))}))
         return out
 
+    def file_list(self, asset_id):
+        if asset_id not in self._detail:
+            self._detail[asset_id] = net.get_json(self.API + "/files/" + asset_id)
+        return self._detail[asset_id]
+
+    def available(self, asset):
+        diffuse = self.file_list(asset.id).get("Diffuse") or {}
+        return sorted({_res_label(k) for k in diffuse} & set(self.resolutions), key=_res_value)
+
     def files(self, asset_id, res):
         """[(role, url, ext, size)] for the maps of one asset at res (or the nearest smaller)."""
-        data = net.get_json(self.API + "/files/" + asset_id)
+        data = self.file_list(asset_id)
         ladder = ["16k", "8k", "4k", "2k", "1k"]
         want = res.lower()
         start = ladder.index(want) if want in ladder else 1
@@ -404,8 +456,8 @@ class FreePBR(Source):
     label = "FreePBR"
     licence = "Free for non-commercial use (commercial use needs the paid FreePBR licence)"
     sorts = ("Newest", "Name")
+    resolutions = ("2K",)
     fixed_resolution = "2K"
-    best_resolution = "2K"
     ROOT = "https://freepbr.com"
 
     def fetch_catalogue(self):
@@ -467,7 +519,7 @@ class ShareTextures(Source):
     label = "ShareTextures"
     licence = "CC0 (public domain)"
     sorts = ("Popular", "Newest", "Name")
-    best_resolution = "4K"
+    resolutions = ("1K", "2K", "4K")
     API = "https://api2.sharetextures.com/api/v0/for-frontend/"
     SITE = "https://www.sharetextures.com"
     IMAGES = "https://images.sharetextures.com/"
@@ -498,11 +550,21 @@ class ShareTextures(Source):
                                     "date": _timestamp(it.get("publishDate"))}))
         return out
 
+    def links(self, asset_id):
+        """[(size, zip url)] from the material's page data."""
+        if asset_id not in self._detail:
+            detail = net.get_json(self.API + "item/" + urllib.parse.quote(asset_id))
+            self._detail[asset_id] = [
+                (m.group(1).upper(), l.get("value")) for l in (detail.get("data") or {}).get("downloadLinks") or []
+                for m in [re.search(r"(\d+K)", (l.get("title") or "") + " " + (l.get("value") or ""), re.I)]
+                if m and (l.get("value") or "").lower().endswith(".zip")]
+        return self._detail[asset_id]
+
+    def available(self, asset):
+        return sorted({r for r, u in self.links(asset.id)}, key=_res_value)
+
     def download(self, asset, res, work, progress, cancel):
-        detail = net.get_json(self.API + "item/" + urllib.parse.quote(asset.id))
-        links = [(m.group(1).upper(), l.get("value")) for l in (detail.get("data") or {}).get("downloadLinks") or []
-                 for m in [re.search(r"(\d+K)", (l.get("title") or "") + " " + (l.get("value") or ""), re.I)]
-                 if m and (l.get("value") or "").lower().endswith(".zip")]
+        links = list(self.links(asset.id))
         if not links:
             raise RuntimeError("ShareTextures has no texture download for " + asset.name)
         want = _res_value(res)
@@ -522,7 +584,7 @@ class AMDMatLib(Source):
     label = "AMD GPUOpen"
     licence = "Free, commercial use allowed (AMD MaterialX Library)"
     sorts = ("Newest", "Name")
-    best_resolution = "4K"
+    resolutions = ("1K", "2K", "4K", "8K")
     API = "https://api.matlib.gpuopen.com/api/"
     PAGE = "https://matlib.gpuopen.com/main/materials/all?material="
 
@@ -546,28 +608,38 @@ class AMDMatLib(Source):
             out.append(Asset(self.id, m["id"], (m.get("title") or m["id"]).strip(),
                              self.API + "renders/%s/download_thumbnail/" % renders[0] if renders else "",
                              tags=[tags[t] for t in m.get("tags") or [] if t in tags],
-                             categories=[cat] if cat else [], page_url=self.PAGE + m["id"], max_res="4K",
+                             categories=[cat] if cat else [], page_url=self.PAGE + m["id"], max_res="",  # 1K-8K
                              extra={"date": _timestamp(m.get("published_date") or m.get("created_date")),
                                     "packages": m["packages"]}))
         return out
 
     @staticmethod
     def pick(packages, res):
-        """packages: [(k, bits, info)]. 8 bit is plenty for these maps; the largest
-        size up to res, else the smallest there is."""
-        eight = [p for p in packages if p[1] == 8] or packages
+        """packages: [(k, bits, info)]. The largest size up to res (else the smallest
+        there is); 8 bit where both exist - the 16 bit packages are twice the size."""
         want = _res_value(res)
-        fits = [p for p in eight if p[0] <= want]
-        return max(fits, key=lambda p: p[0]) if fits else min(eight, key=lambda p: p[0])
+        fits = [p for p in packages if p[0] <= want]
+        k = max(p[0] for p in fits) if fits else min(p[0] for p in packages)
+        return min((p for p in packages if p[0] == k), key=lambda p: p[1])
+
+    def packages(self, asset):
+        """[(k, bits, package info)], asked once per material."""
+        if asset.id not in self._detail:
+            ids = asset.extra.get("packages") or net.get_json(self.API + "materials/%s/" % asset.id).get("packages") or []
+            packages = []
+            for pid in ids:
+                info = net.get_json(self.API + "packages/%s/" % pid)
+                m = re.match(r"\s*(\d+)\s*k\s*(\d+)\s*b", info.get("label") or "", re.I)
+                if m and info.get("file_url"):
+                    packages.append((int(m.group(1)), int(m.group(2)), info))
+            self._detail[asset.id] = packages
+        return self._detail[asset.id]
+
+    def available(self, asset):
+        return sorted({"%dK" % k for k, bits, info in self.packages(asset)}, key=_res_value)
 
     def download(self, asset, res, work, progress, cancel):
-        ids = asset.extra.get("packages") or net.get_json(self.API + "materials/%s/" % asset.id).get("packages") or []
-        packages = []
-        for pid in ids:
-            info = net.get_json(self.API + "packages/%s/" % pid)
-            m = re.match(r"\s*(\d+)\s*k\s*(\d+)\s*b", info.get("label") or "", re.I)
-            if m and info.get("file_url"):
-                packages.append((int(m.group(1)), int(m.group(2)), info))
+        packages = self.packages(asset)
         if not packages:
             raise RuntimeError("AMD has no texture package for " + asset.name)
         k, bits, info = self.pick(packages, res)
@@ -587,6 +659,16 @@ class Everything(Source):
     licence = "ambientCG, Poly Haven and ShareTextures are CC0; AMD is free; FreePBR is for non-commercial use"
     sorts = ("Mixed", "Newest", "Name")
     MEMBERS = ("ambientcg", "polyhaven", "sharetextures", "amd", "freepbr")
+
+    @classmethod
+    def resolutions_of(cls, sites=None):
+        """Every size the given sites offer, smallest first."""
+        found = {r for s in (sites if sites is not None else cls.MEMBERS) for r in SOURCES[s].resolutions}
+        return tuple(sorted(found, key=_res_value))
+
+    @property
+    def resolutions(self):
+        return self.resolutions_of()
 
     def __init__(self):
         Source.__init__(self)
@@ -669,6 +751,7 @@ class Installed(Source):
     label = "Installed"
     licence = ""
     sorts = ("Name", "Newest", "Source")
+    resolutions = ()
 
     def __init__(self):
         Source.__init__(self)
@@ -768,9 +851,23 @@ def fetch(library, asset, res, progress=lambda f: None, cancel=None, waiting=lam
     now: then we wait for it (waiting(holder) is called) and use theirs.
     """
     src = SOURCES[asset.source]
-    res = (src.fixed_resolution or res).upper()
-    if _res_value(res) > _res_value(src.best_resolution):
-        res = src.best_resolution                 # e.g. ShareTextures stops at 4K
+    wanted = src.fixed_resolution or res or HIGHEST
+    if wanted != HIGHEST:                          # already there at exactly that size: no need to ask
+        found = library.find(asset, wanted.upper())
+        if found:
+            return found[0], found[1], True
+    try:
+        res = choose_res(src.available(asset), wanted)
+    except (net.Cancelled, KeyboardInterrupt):
+        raise
+    except Exception:
+        res = choose_res(library.resolutions(asset), wanted)   # offline: whatever the library has
+        found = library.find(asset, res) if res else None
+        if found:
+            return found[0], found[1], True
+        raise
+    if not res:
+        raise RuntimeError("%s lists no downloads for %s" % (src.label, asset.name))
     found = library.find(asset, res)
     if found:
         return found[0], found[1], True

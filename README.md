@@ -14,11 +14,12 @@ Requires Cinema 4D 2023 or later with Redshift.
 
 ## Use
 
-- **Find materials:** pick a site tab or **Everything**, then search or click a category on the left. Thumbnails keep loading as you scroll.
+- **Find materials:** pick a site tab or **Everything**, then search or click a category on the left. **Up / Down** step through the categories. Thumbnails load as you scroll.
 - **Resize thumbnails:** **Ctrl + mouse wheel**, or the **Size** slider.
-- **Make a material:** double-click a thumbnail. It downloads at the chosen resolution and is assigned to the selected objects.
+- **Pick a resolution:** the **Resolution** menu lists only the sizes that site has. **Highest**, the default, downloads each material at the largest size it comes in: up to 16K on ambientCG and Poly Haven, 8K on AMD and 4K on ShareTextures.
+- **Make a material:** double-click a thumbnail. It downloads and is assigned to the selected objects.
   - The material is a Standard Material with colour, roughness, metalness, normal/bump, opacity and emission.
-  - Displacement is optional.
+  - Displacement is on by default.
 - **More actions:** right-click a thumbnail to open its web page or show it in the library folder.
 
 ## Shared library

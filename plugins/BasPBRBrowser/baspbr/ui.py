@@ -1,10 +1,11 @@
 """The BasPBR Browser window (Cinema 4D only).
 
-Tabs: Everything (every site at once), ambientCG, Poly Haven, ShareTextures,
-FreePBR, and Installed (the library folder - possibly a share several PCs use).
-Under them: search, sort, resolution, the library folder and material options;
-on the left the categories, on the right a thumbnail grid that keeps loading as
-you scroll (Ctrl + mouse wheel or the Size slider resizes the thumbnails).
+Tabs: Everything (every site at once, or the ticked ones), ambientCG, Poly
+Haven, ShareTextures, AMD GPUOpen, FreePBR, and Installed (the library folder -
+possibly a share several PCs use). Under them: search, sort, resolution, the
+library folder and material options; on the left the categories (Up / Down step
+through them), on the right the thumbnails, which load as they scroll into view
+(Ctrl + mouse wheel or the Size slider resizes them).
 
 Click selects (Ctrl-click adds), double-click or "Create material" builds the
 Redshift material - downloading it first unless it's in the library already.
@@ -27,8 +28,6 @@ from . import library as libmod
 from . import jobs as jobsmod
 from . import rsmat, settings, sources, updater, version
 
-CHUNK = 60                      # thumbnails added each time the grid nears its end
-
 # gadget ids
 ID_TABS = 1000
 ID_QUERY, ID_SEARCH, ID_SORT, ID_RES = 1002, 1003, 1004, 1005
@@ -38,7 +37,7 @@ ID_COUNT, ID_SIZE, ID_STATUS, ID_CANCEL, ID_CREATE = 1031, 1032, 1033, 1034, 103
 ID_LICENCE = 1036
 ID_LIBRARY, ID_LIB_BROWSE, ID_LIB_OPEN, ID_LIB_RESCAN, ID_LIB_INFO = 1040, 1041, 1042, 1043, 1044
 ID_MENU_FOLDER, ID_MENU_OPEN, ID_MENU_CHECK, ID_MENU_REFRESH = 1100, 1101, 1102, 1103
-ID_MENU_UPDATE, ID_MENU_TOKEN, ID_MENU_ABOUT = 1110, 1111, 1112
+ID_MENU_UPDATE, ID_MENU_TOKEN, ID_MENU_ABOUT, ID_MENU_LOG = 1110, 1111, 1112, 1113
 
 # popup menu ids (must be >= FIRST_POPUP_ID)
 POP_CREATE = c4d.FIRST_POPUP_ID + 1
@@ -67,6 +66,26 @@ def _remember(key, bmp, jobs):
     while len(_bitmaps) > MAX_BITMAPS:
         old, _ = _bitmaps.popitem(last=False)
         jobs.forget_thumb(old)                  # asked for again if it scrolls back into view
+
+
+def _get(msg, key, default=0):
+    try:
+        return msg[key]
+    except Exception:
+        return default
+
+
+def _ctrl(msg):
+    """Ctrl held, from the event or (if the event doesn't say) the keyboard itself."""
+    if _get(msg, c4d.BFM_INPUT_QUALIFIER) & c4d.QCTRL:
+        return True
+    try:
+        state = c4d.BaseContainer()
+        if gui.GetInputState(c4d.BFM_INPUT_KEYBOARD, c4d.BFM_INPUT_CHANNEL, state):
+            return bool(state.GetInt32(c4d.BFM_INPUT_QUALIFIER) & c4d.QCTRL)
+    except Exception:
+        pass
+    return False
 
 
 def _fit(area, text, width):
@@ -163,6 +182,9 @@ class Categories(gui.GeUserArea):
             self.DrawText(_fit(self, self.note, w - 12), 8, self.row_y(len(self.rows) + 1))
 
     def InputEvent(self, msg):
+        self.dialog.log_input("sidebar", msg)
+        if msg[c4d.BFM_INPUT_DEVICE] == c4d.BFM_INPUT_KEYBOARD:
+            return self.dialog.key(msg[c4d.BFM_INPUT_CHANNEL])
         if msg[c4d.BFM_INPUT_DEVICE] != c4d.BFM_INPUT_MOUSE or msg[c4d.BFM_INPUT_CHANNEL] != c4d.BFM_INPUT_MOUSELEFT:
             return False
         local = self.Global2Local()
@@ -170,9 +192,7 @@ class Categories(gui.GeUserArea):
         if self.toggles and y < self._top():
             i = int((y - 3) // ROW_H)
             if 0 <= i < len(self.toggles):
-                solo = bool(msg.get(c4d.BFM_INPUT_QUALIFIER, 0) & c4d.QCTRL) if hasattr(msg, "get") \
-                    else bool(msg[c4d.BFM_INPUT_QUALIFIER] & c4d.QCTRL)
-                self.dialog.site_toggled(self.toggles[i][0], solo)
+                self.dialog.site_toggled(self.toggles[i][0], _ctrl(msg))
             return True
         i = int((y - self._top()) // ROW_H)
         if 0 <= i < len(self.rows) and self.rows[i][0] != self.selected:
@@ -184,6 +204,12 @@ class Categories(gui.GeUserArea):
 
 # =====================================================================================
 class Grid(gui.GeUserArea):
+    """The thumbnails. The grid scrolls itself - mouse wheel, its scroll bar, Page Up /
+    Page Down / Home / End - instead of sitting in a scroll group: that way the wheel
+    (and Ctrl + wheel, for the size) always reaches it, and however long the list,
+    only the tiles in view are drawn and have their thumbnails fetched."""
+    BAR = 12                  # scroll bar width
+
     def __init__(self, dialog, tile=128):
         super(Grid, self).__init__()
         self.dialog = dialog
@@ -191,6 +217,7 @@ class Grid(gui.GeUserArea):
         self.selected = set()
         self.tile = tile
         self.cols = 1
+        self.scroll = 0           # pixels scrolled down
 
     @property
     def cell_w(self):
@@ -200,46 +227,60 @@ class Grid(gui.GeUserArea):
     def cell_h(self):
         return self.tile + CAPTION + GAP
 
-    # ---- layout ----------------------------------------------------------------------
+    # ---- layout and scrolling ---------------------------------------------------------
+    def _w(self):
+        return self.GetWidth() or 700
+
+    def _h(self):
+        return self.GetHeight() or 500
+
     def _columns(self, width):
-        return max(1, (max(width, self.cell_w) - GAP) // self.cell_w)
+        return max(1, (max(width - self.BAR, self.cell_w) - GAP) // self.cell_w)
 
     def content_height(self):
         rows = (len(self.items) + self.cols - 1) // self.cols
         return rows * self.cell_h + GAP
 
+    def max_scroll(self):
+        return max(0, self.content_height() - self._h())
+
+    def scroll_to(self, y):
+        y = int(max(0, min(self.max_scroll(), y)))
+        if y != self.scroll:
+            self.scroll = y
+            self.Redraw()
+
+    def scroll_by(self, dy):
+        self.scroll_to(self.scroll + dy)
+
     def GetMinSize(self):
-        self.cols = self._columns(self.GetWidth() or 700)
-        return self.cell_w + GAP, max(self.cell_h, self.content_height())
+        return self.cell_w + GAP + self.BAR, 200
 
     def Sized(self, w, h):
-        cols = self._columns(w)
-        if cols != self.cols:
-            self.cols = cols
-            self.LayoutChanged()
+        self.cols = self._columns(w)
+        self.scroll = max(0, min(self.max_scroll(), self.scroll))
+        self.Redraw()
 
     def set_items(self, items):
         self.items = list(items)
         self.selected = set()
-        self.cols = self._columns(self.GetWidth() or 700)
-        self.LayoutChanged()
-        self.Redraw()
-
-    def add_items(self, items):
-        self.items.extend(items)
-        self.LayoutChanged()
+        self.scroll = 0
+        self.cols = self._columns(self._w())
         self.Redraw()
 
     def set_tile(self, size):
+        first = (self.scroll // self.cell_h) * self.cols       # keep the top row in view
         self.tile = size
-        self.cols = self._columns(self.GetWidth() or 700)
-        self.LayoutChanged()
+        self.cols = self._columns(self._w())
+        self.scroll = max(0, min(self.max_scroll(), (first // self.cols) * self.cell_h))
         self.Redraw()
 
     def tile_rect(self, i):
+        """Top-left of tile i, in list coordinates (scroll not applied)."""
         return GAP + (i % self.cols) * self.cell_w, GAP + (i // self.cols) * self.cell_h
 
     def index_at(self, x, y):
+        """Tile under list coordinates x, y, or -1."""
         col, row = (x - GAP) // self.cell_w, (y - GAP) // self.cell_h
         if col < 0 or row < 0 or col >= self.cols:
             return -1
@@ -249,6 +290,20 @@ class Grid(gui.GeUserArea):
             return -1
         return i
 
+    def visible_range(self, extra_rows=0):
+        top, bottom = self.scroll, self.scroll + self._h() + extra_rows * self.cell_h
+        first = max(0, int((top - GAP) // self.cell_h)) * self.cols
+        last = min(len(self.items), (int((bottom - GAP) // self.cell_h) + 1) * self.cols)
+        return first, max(first, last)
+
+    def _bar(self):
+        """(thumb top, thumb height) of the scroll bar, or None when everything fits."""
+        h, total = self._h(), self.content_height()
+        if total <= h:
+            return None
+        thumb = max(24, int(h * h / float(total)))
+        return int((h - thumb) * self.scroll / float(self.max_scroll() or 1)), thumb
+
     # ---- drawing -------------------------------------------------------------------------
     def DrawMsg(self, x1, y1, x2, y2, msg):
         self.OffScreenOn()
@@ -256,21 +311,27 @@ class Grid(gui.GeUserArea):
         bg = _rgb(self, c4d.COLOR_BG, c4d.Vector(0.2))
         self.DrawSetPen(bg)
         self.DrawRectangle(x1, y1, x2, y2)
+        d = self.dialog
         if not self.items:
             self.DrawSetTextCol(c4d.COLOR_TEXT, c4d.COLOR_TRANS)
-            self.DrawText(self.dialog.empty_text, GAP * 2, GAP * 2)
+            self.DrawText(d.empty_text, GAP * 2, GAP * 2)
             return
         T = self.tile
         tile_bg = bg * 0.75
         accent = c4d.Vector(0.98, 0.62, 0.16)
-        d = self.dialog
         show_local = d.tab != "installed"
         show_source = d.tab == "everything"
-        first = max(0, int((y1 - GAP) // self.cell_h) * self.cols)
-        last = min(len(self.items), (int((y2 - GAP) // self.cell_h) + 1) * self.cols)
+        first, last = self.visible_range()
+        # thumbnails: the next screen first, then what's in view (served newest-first)
+        ahead = self.visible_range(extra_rows=self._h() // self.cell_h + 1)
+        d.jobs.wanted = {a.key for a in self.items[ahead[0]:ahead[1]]}
+        for asset in self.items[last:ahead[1]]:
+            if asset.key not in _bitmaps:
+                d.jobs.thumb(asset)
         for i in range(first, last):
             asset = self.items[i]
             x, y = self.tile_rect(i)
+            y -= self.scroll
             self.DrawSetPen(tile_bg)
             self.DrawRectangle(x, y, x + T - 1, y + T - 1)
             bmp = _bitmaps.get(asset.key)
@@ -311,31 +372,52 @@ class Grid(gui.GeUserArea):
                     self.DrawRectangle(x + T + k, y - 2 + k, x + T + 1 + k, y + T + 1 - k)
             self.DrawSetTextCol(c4d.COLOR_TEXT, c4d.COLOR_TRANS)
             self.DrawText(_fit(self, asset.name, T), x, y + T + 2)
+        bar = self._bar()
+        if bar:
+            w, h = self._w(), self._h()
+            self.DrawSetPen(bg * 0.8)
+            self.DrawRectangle(w - self.BAR, 0, w, h)
+            self.DrawSetPen(bg * 1.9)
+            self.DrawRectangle(w - self.BAR + 2, bar[0], w - 3, bar[0] + bar[1])
 
     # ---- input ---------------------------------------------------------------------------
     def InputEvent(self, msg):
-        if msg[c4d.BFM_INPUT_DEVICE] != c4d.BFM_INPUT_MOUSE:
-            return False
-        channel = msg[c4d.BFM_INPUT_CHANNEL]
-        if channel == c4d.BFM_INPUT_MOUSEWHEEL:
-            if msg[c4d.BFM_INPUT_QUALIFIER] & c4d.QCTRL:           # Ctrl + wheel: thumbnail size
-                self.dialog.wheel_resize(msg[c4d.BFM_INPUT_VALUE])
+        self.dialog.log_input("grid", msg)
+        device, channel = msg[c4d.BFM_INPUT_DEVICE], msg[c4d.BFM_INPUT_CHANNEL]
+        if device == c4d.BFM_INPUT_KEYBOARD:
+            page = self._h() - self.cell_h
+            moves = {c4d.KEY_PGDOWN: page, c4d.KEY_PGUP: -page,
+                     c4d.KEY_END: 10 ** 9, c4d.KEY_HOME: -10 ** 9}
+            if channel in moves:
+                self.scroll_by(moves[channel])
                 return True
-            return False                                        # plain wheel: let the view scroll
+            return self.dialog.key(channel)
+        if device != c4d.BFM_INPUT_MOUSE:
+            return False
+        if channel == c4d.BFM_INPUT_MOUSEWHEEL:
+            value = _get(msg, c4d.BFM_INPUT_VALUE)
+            if _ctrl(msg):                                       # Ctrl + wheel: thumbnail size
+                self.dialog.wheel_resize(value)
+            else:                                                # 120 = one notch, about 3/4 of a row
+                self.scroll_by(-value / 120.0 * max(48, self.cell_h * 0.75))
+            return True
         local = self.Global2Local()
         x = msg[c4d.BFM_INPUT_X] + local["x"]
         y = msg[c4d.BFM_INPUT_Y] + local["y"]
-        i = self.index_at(x, y)
+        if channel == c4d.BFM_INPUT_MOUSELEFT and x >= self._w() - self.BAR and self._bar():
+            self._scroll_bar_click(y, msg)
+            return True
+        i = self.index_at(x, y + self.scroll)
         if channel == c4d.BFM_INPUT_MOUSELEFT:
             if i < 0:
                 self.selected = set()
-            elif msg[c4d.BFM_INPUT_QUALIFIER] & c4d.QCTRL:
+            elif _get(msg, c4d.BFM_INPUT_QUALIFIER) & c4d.QCTRL:
                 self.selected ^= {i}
             else:
                 self.selected = {i}
             self.Redraw()
             self.dialog.selection_changed()
-            if i >= 0 and msg[c4d.BFM_INPUT_DOUBLECLICK]:
+            if i >= 0 and _get(msg, c4d.BFM_INPUT_DOUBLECLICK):
                 self.dialog.create([self.items[i]])
             return True
         if channel == c4d.BFM_INPUT_MOUSERIGHT and i >= 0:
@@ -346,6 +428,28 @@ class Grid(gui.GeUserArea):
             self.dialog.context_menu(self.items[i])
             return True
         return False
+
+    def _scroll_bar_click(self, y, msg):
+        top, thumb = self._bar()
+        if not top <= y <= top + thumb:                      # in the track: a page up / down
+            self.scroll_by((self._h() - self.cell_h) * (1 if y > top else -1))
+            return
+        start, moved = self.scroll, 0.0                      # on the thumb: drag it
+        per_px = self.max_scroll() / float(max(1, self._h() - thumb))
+        try:
+            self.MouseDragStart(c4d.KEY_MLEFT, msg[c4d.BFM_INPUT_X], msg[c4d.BFM_INPUT_Y],
+                                c4d.MOUSEDRAGFLAGS_DONTHIDEMOUSE | c4d.MOUSEDRAGFLAGS_NOMOVE)
+            while True:
+                result, dx, dy, channels = self.MouseDrag()
+                if result != c4d.MOUSEDRAGRESULT_CONTINUE:
+                    break
+                moved += dy
+                self.scroll_to(start + moved * per_px)
+        finally:
+            try:
+                self.MouseDragEnd()
+            except Exception:
+                pass
 
     def selected_assets(self):
         return [self.items[i] for i in sorted(self.selected) if i < len(self.items)]
@@ -367,7 +471,7 @@ class BrowserDialog(gui.GeDialog):
         self.state = {}             # asset key -> float progress | "queued" | "waiting" | "error"
         self.local = set()          # source:id keys already in the library
         self.cat_cache = {}         # tab -> [(key, label, count)]
-        self.results = []           # every match of the current search; the grid shows a growing part
+        self.results = []           # every match of the current search (all in the grid)
         self.token = 0
         self.searching = False
         self.search_due = 0.0
@@ -379,6 +483,12 @@ class BrowserDialog(gui.GeDialog):
         self.manual_update_check = False
         self.cat_pending = set()    # tabs whose categories are being fetched
         self._wheel = (0.0, 0)      # last Ctrl+wheel step (time, direction)
+        self._key = (0.0, 0)        # last arrow-key step (time, direction)
+        self.res_options = []       # the Resolution menu's entries on this tab
+        self.sizes = {}             # asset key -> sizes it really comes in (asked on selection)
+        self.log_inputs = False     # Help > Log mouse wheel and keys
+        if not isinstance(self.cfg.get("res"), dict):
+            self.cfg["res"] = {}
 
     # ---- layout --------------------------------------------------------------------------
     def CreateLayout(self):
@@ -394,6 +504,7 @@ class BrowserDialog(gui.GeDialog):
         self.MenuSubBegin("Help")
         self.MenuAddString(ID_MENU_UPDATE, "Check for updates")
         self.MenuAddString(ID_MENU_TOKEN, "GitHub token (private repository)…")
+        self.MenuAddString(ID_MENU_LOG, "Log mouse wheel and keys to the Console")
         self.MenuAddSeparator()
         self.MenuAddString(ID_MENU_ABOUT, "About BasPBR Browser")
         self.MenuSubEnd()
@@ -412,9 +523,7 @@ class BrowserDialog(gui.GeDialog):
             self.AddStaticText(0, c4d.BFH_LEFT, name=" Sort")
             self.AddComboBox(ID_SORT, c4d.BFH_LEFT, 100)
             self.AddStaticText(0, c4d.BFH_LEFT, name=" Resolution")
-            self.AddComboBox(ID_RES, c4d.BFH_LEFT, 70)
-            for n, r in enumerate(sources.RESOLUTIONS):
-                self.AddChild(ID_RES, n, r)
+            self.AddComboBox(ID_RES, c4d.BFH_LEFT, 90)
         self.GroupEnd()
 
         if self.GroupBegin(0, c4d.BFH_SCALEFIT, cols=6, rows=1):
@@ -443,11 +552,8 @@ class BrowserDialog(gui.GeDialog):
             self.AddUserArea(ID_CATS, c4d.BFH_SCALEFIT | c4d.BFV_TOP, SIDEBAR_W)
             self.AttachUserArea(self.cats, ID_CATS)
             self.GroupEnd()
-            self.ScrollGroupBegin(ID_SCROLL, c4d.BFH_SCALEFIT | c4d.BFV_SCALEFIT,
-                                  c4d.SCROLLGROUP_VERT | c4d.SCROLLGROUP_AUTOVERT, 600, 420)
-            self.AddUserArea(ID_GRID, c4d.BFH_SCALEFIT | c4d.BFV_TOP)
+            self.AddUserArea(ID_GRID, c4d.BFH_SCALEFIT | c4d.BFV_SCALEFIT, 600, 420)
             self.AttachUserArea(self.grid, ID_GRID)
-            self.GroupEnd()
         self.GroupEnd()
 
         if self.GroupBegin(0, c4d.BFH_SCALEFIT, cols=6, rows=1):
@@ -469,10 +575,8 @@ class BrowserDialog(gui.GeDialog):
                 self.tabs.AppendString(n, sources.SOURCES[tid].label, tid == self.tab)
         self.SetString(ID_QUERY, cfg.get("query", ""))
         self.SetString(ID_LIBRARY, self.library.root)
-        res = cfg.get("resolution", "4K")
-        self.SetInt32(ID_RES, sources.RESOLUTIONS.index(res) if res in sources.RESOLUTIONS else 2)
         self.SetBool(ID_ASSIGN, cfg.get("assign", True))
-        self.SetBool(ID_DISP, cfg.get("displacement", False))
+        self.SetBool(ID_DISP, cfg.get("displacement", True))
         self.SetBool(ID_BUMP_HEIGHT, cfg.get("bump_from_height", True))
         self.SetFloat(ID_DISP_SCALE, cfg.get("displacement_scale", 1.0), 0.0, 1000.0, 0.1, c4d.FORMAT_METER)
         self.SetInt32(ID_SIZE, self.grid.tile, TILE_MIN, TILE_MAX, TILE_STEP)
@@ -492,7 +596,26 @@ class BrowserDialog(gui.GeDialog):
 
     @property
     def resolution(self):
-        return sources.RESOLUTIONS[self.GetInt32(ID_RES)]
+        """The Resolution menu's choice: "Highest" or a size such as "4K"."""
+        i = self.GetInt32(ID_RES)
+        return self.res_options[i] if 0 <= i < len(self.res_options) else sources.HIGHEST
+
+    def _fill_resolutions(self):
+        """Only the sizes this tab's site(s) offer, largest first, after "Highest"."""
+        if self.tab == "installed":
+            sizes = ()
+        elif self.tab == "everything":
+            sizes = sources.Everything.resolutions_of(self.sites)
+        else:
+            sizes = self.source.resolutions
+        sizes = sorted(sizes, key=sources._res_value, reverse=True)
+        self.res_options = sizes if len(sizes) <= 1 else [sources.HIGHEST] + sizes
+        self.FreeChildren(ID_RES)
+        for n, r in enumerate(self.res_options or ["—"]):
+            self.AddChild(ID_RES, n, r)
+        saved = self.cfg["res"].get(self.tab, sources.HIGHEST)
+        self.SetInt32(ID_RES, self.res_options.index(saved) if saved in self.res_options else 0)
+        self.Enable(ID_RES, len(self.res_options) > 1)
 
     @property
     def sites(self):
@@ -525,6 +648,7 @@ class BrowserDialog(gui.GeDialog):
             on.append(sid)
         self.cfg["sites_off"] = [s for s in members if s not in on]
         self.cats.set_toggles(self._site_toggles())
+        self._fill_resolutions()
         self._show_categories()
         self.search()
 
@@ -561,15 +685,15 @@ class BrowserDialog(gui.GeDialog):
         self.SetInt32(ID_SORT, src.sorts.index(sort) if sort in src.sorts else 0)
         self.Enable(ID_SORT, len(src.sorts) > 1)
         installed = self.tab == "installed"
-        self.Enable(ID_RES, not src.fixed_resolution and not installed)
+        self._fill_resolutions()
         if installed:
             self.SetString(ID_LICENCE, "In the library folder — no download needed")
         else:
             extra = ""
             if src.fixed_resolution:
                 extra = "  ·  %s only" % src.fixed_resolution
-            elif src.best_resolution != "8K" and src.id != "everything":
-                extra = "  ·  up to %s" % src.best_resolution
+            elif self.tab != "everything":
+                extra = "  ·  up to %s" % src.resolutions[-1]
             self.SetString(ID_LICENCE, src.licence + extra)
         self.cats.set_toggles(self._site_toggles() if self.tab == "everything" else [])
         if installed:
@@ -625,7 +749,8 @@ class BrowserDialog(gui.GeDialog):
         cfg["source"] = self.tab
         cfg["query"] = self.GetString(ID_QUERY)
         cfg["sort"][self.tab] = self._sort()
-        cfg["resolution"] = self.resolution
+        if self.res_options:
+            cfg["res"][self.tab] = self.resolution
         cfg["assign"] = self.GetBool(ID_ASSIGN)
         cfg["displacement"] = self.GetBool(ID_DISP)
         cfg["displacement_scale"] = self.GetFloat(ID_DISP_SCALE)
@@ -736,44 +861,63 @@ class BrowserDialog(gui.GeDialog):
             failed = getattr(self.source, "failed", None)
             if failed:
                 self.status("Couldn't reach: " + ", ".join(failed))
-        self.grid.set_items([])
-        self.SetVisibleArea(ID_SCROLL, 0, 0, 10, 10)
-        self._show_more()
+        for a in assets:
+            self.assets[a.key] = a
+        self.grid.set_items(assets)              # thumbnails load as tiles come into view
+        self._count()
         if self._cat_key() not in self.cat_cache and self.tab != "installed":
             self._load_categories()               # (again, if it failed) - instant now the catalogue is loaded
 
-    def _show_more(self):
-        """Hand the grid the next stretch of results (the endless scroll)."""
-        start = len(self.grid.items)
-        if start >= len(self.results):
-            self._count()
-            return
-        more = self.results[start:start + max(CHUNK, self.grid.cols * 6)]
-        for a in more:
-            self.assets[a.key] = a
-        self.grid.add_items(more)                 # thumbnails load as the tiles get drawn
-        self._count()
-
     def _count(self):
-        n, shown = len(self.results), len(self.grid.items)
-        text = "%d material%s" % (n, "" if n == 1 else "s")
-        if 0 < shown < n:
-            text += "  (%d shown)" % shown
-        self.SetString(ID_COUNT, text)
-
-    def _near_the_end(self):
-        if len(self.grid.items) >= len(self.results):
-            return False
-        try:
-            area = self.GetVisibleArea(ID_SCROLL)
-            bottom = area["y2"]
-        except Exception:
-            return True
-        return bottom >= self.grid.content_height() - 3 * self.grid.cell_h
+        n = len(self.results)
+        self.SetString(ID_COUNT, "%d material%s" % (n, "" if n == 1 else "s"))
 
     def category_changed(self, key):
         self.cfg.setdefault("category", {})[self.tab] = key
         self.search()
+
+    # ---- keys and the mouse wheel ------------------------------------------------------------
+    def key(self, channel):
+        """A key pressed in the sidebar or the grid (or anywhere, via Message).
+        Up / Down step through the categories, wrapping around."""
+        if channel not in (c4d.KEY_UP, c4d.KEY_DOWN):
+            return False
+        step = -1 if channel == c4d.KEY_UP else 1
+        now = time.time()
+        if now - self._key[0] < 0.01 and self._key[1] == step:
+            return True                          # the same key press, seen by a gadget and the dialog
+        self._key = (now, step)
+        keys = [r[0] for r in self.cats.rows]
+        if len(keys) > 1:
+            i = (keys.index(self.cats.selected) + step) % len(keys) if self.cats.selected in keys else 0
+            self.cats.selected = keys[i]
+            self.cats.Redraw()
+            self._reveal_category(i)
+            self.cfg.setdefault("category", {})[self.tab] = keys[i]
+            self.search_due = now + 0.15         # the results follow once the key rests
+        return True
+
+    def _reveal_category(self, i):
+        """Scroll the sidebar so category row i is in view."""
+        y = self.cats.row_y(i)
+        try:
+            area = self.GetVisibleArea(ID_CAT_SCROLL)
+            h = area["y2"] - area["y1"]
+            top = y - ROW_H if y - ROW_H < area["y1"] else (y + 2 * ROW_H - h if y + 2 * ROW_H > area["y2"] else None)
+            if top is not None:
+                top = max(0, top)
+                self.SetVisibleArea(ID_CAT_SCROLL, 0, top, SIDEBAR_W, top + h)
+        except Exception:
+            pass
+
+    def log_input(self, where, msg):
+        if not self.log_inputs:
+            return
+        device, channel = _get(msg, c4d.BFM_INPUT_DEVICE), _get(msg, c4d.BFM_INPUT_CHANNEL)
+        if device == c4d.BFM_INPUT_KEYBOARD or channel == c4d.BFM_INPUT_MOUSEWHEEL:
+            print("[BasPBR Browser] input in %s: %s channel=%s value=%s qualifier=%s ctrl=%s" % (
+                where, "keyboard" if device == c4d.BFM_INPUT_KEYBOARD else "wheel", channel,
+                _get(msg, c4d.BFM_INPUT_VALUE), _get(msg, c4d.BFM_INPUT_QUALIFIER), _ctrl(msg)))
 
     # ---- creating materials ---------------------------------------------------------------------
     def selection_changed(self):
@@ -786,12 +930,31 @@ class BrowserDialog(gui.GeDialog):
                 when = ("  ·  downloaded %s%s" % (e["downloaded"], who)) if e.get("downloaded") else ""
                 self.status("%s  (%s)%s" % (a.name, a.extra["origin"], when))
             else:
-                here = " · in library" if a.key in self.local else ""
-                cats = ", ".join(a.categories[:3])
-                self.status("%s  (%s%s, up to %s)%s" % (a.name, a.source_label, (" · " + cats) if cats else "",
-                                                       a.max_res or "?", here))
+                self._describe(a)
+                if a.key not in self.sizes:
+                    self.jobs.details(a)             # the sizes it really comes in
         elif sel:
             self.status("%d selected" % len(sel))
+
+    def _describe(self, a):
+        here = "  ·  in library" if a.key in self.local else ""
+        cats = ", ".join(a.categories[:3])
+        sizes = self.sizes.get(a.key)
+        src = sources.SOURCES[a.source]
+        if sizes:
+            get = sources.choose_res(sizes, src.fixed_resolution or self.resolution)
+            size = ("%s–%s, downloads %s" % (sizes[0], sizes[-1], get)) if len(sizes) > 1 else "%s only" % sizes[0]
+        elif a.key in self.sizes:
+            size = "sizes unknown"
+        else:
+            size = "checking sizes…"
+        self.status("%s  (%s%s)  %s%s" % (a.name, a.source_label, (" · " + cats) if cats else "", size, here))
+
+    def _details(self, key, sizes, error):
+        self.sizes[key] = sizes
+        sel = self.grid.selected_assets()
+        if len(sel) == 1 and sel[0].key == key:
+            self._describe(sel[0])
 
     def _payload(self):
         doc = c4d.documents.GetActiveDocument()
@@ -918,10 +1081,9 @@ class BrowserDialog(gui.GeDialog):
         if asset.source == "installed":
             folder = asset.extra["entry"]["folder"]
         elif asset.key in self.local:
-            src = sources.SOURCES[asset.source]
-            folder = self.library.asset_dir(asset, src.fixed_resolution or self.resolution)
-            if not os.path.isdir(folder):
-                folder = os.path.join(self.library.root, asset.source_label)
+            have = sorted(self.library.resolutions(asset), key=sources._res_value)
+            folder = (self.library.asset_dir(asset, have[-1]) if have
+                      else os.path.join(self.library.root, asset.source_label))
         if folder:
             bc.SetString(POP_FOLDER, "Show in library folder")
         choice = gui.ShowPopupDialog(cd=None, bc=bc, x=c4d.MOUSEPOS, y=c4d.MOUSEPOS)
@@ -946,6 +1108,11 @@ class BrowserDialog(gui.GeDialog):
         elif cid == ID_SORT:
             self.cfg["sort"][self.tab] = self._sort()
             self.search()
+        elif cid == ID_RES:
+            self.cfg["res"][self.tab] = self.resolution
+            sel = self.grid.selected_assets()
+            if len(sel) == 1 and sel[0].source != "installed":
+                self._describe(sel[0])
         elif cid == ID_SIZE:
             self.set_tile_size(self.GetInt32(ID_SIZE))
         elif cid == ID_CREATE:
@@ -995,6 +1162,12 @@ class BrowserDialog(gui.GeDialog):
                 self.cfg["github_token"] = text.strip()
                 self.save()
                 self.status("GitHub token %s." % ("saved" if text.strip() else "removed"))
+        elif cid == ID_MENU_LOG:
+            self.log_inputs = not self.log_inputs
+            print("[BasPBR Browser] logging mouse wheel and keys: %s" % ("on" if self.log_inputs else "off"))
+            self.status("Logging mouse wheel and keys to the Console: %s" % ("on" if self.log_inputs else "off"))
+            if self.log_inputs:
+                c4d.CallCommand(12305)
         elif cid == ID_MENU_ABOUT:
             gui.MessageDialog("BasPBR Browser %s\n\nambientCG, Poly Haven, ShareTextures, AMD GPUOpen and FreePBR "
                               "as Redshift materials.\nUpdates: github.com/%s (%s)" % (version.VERSION, version.REPO, version.BRANCH))
@@ -1013,8 +1186,6 @@ class BrowserDialog(gui.GeDialog):
                 self.SetString(ID_LIB_INFO, "folder not found")
         if self.make_thumbs:
             self._make_thumb(*self.make_thumbs.pop(0))
-        if self._near_the_end():
-            self._show_more()
         redraw = False
         for _ in range(200):
             try:
@@ -1055,6 +1226,8 @@ class BrowserDialog(gui.GeDialog):
                 a = self.assets.get(item[1])
                 self.status("%s: %s" % (a.name if a else item[1], item[2]))
                 redraw = True
+            elif kind == "details":
+                self._details(*item[1:])
             elif kind == "update":
                 self._update_result(*item[1:])
             elif kind == "updated":
@@ -1083,11 +1256,25 @@ class BrowserDialog(gui.GeDialog):
             traceback.print_exc()
 
     def Message(self, msg, result):
-        if msg.GetId() == c4d.BFM_INPUT and msg.GetInt32(c4d.BFM_INPUT_CHANNEL) == c4d.BFM_INPUT_MOUSEWHEEL \
-                and msg.GetInt32(c4d.BFM_INPUT_QUALIFIER) & c4d.QCTRL:
-            self.wheel_resize(msg.GetInt32(c4d.BFM_INPUT_VALUE))
-            return True
+        if msg.GetId() == c4d.BFM_INPUT:
+            self.log_input("dialog", msg)
+            device, channel = msg.GetInt32(c4d.BFM_INPUT_DEVICE), msg.GetInt32(c4d.BFM_INPUT_CHANNEL)
+            if device == c4d.BFM_INPUT_KEYBOARD and channel in (c4d.KEY_UP, c4d.KEY_DOWN) and not self._typing():
+                return self.key(channel)
+            if channel == c4d.BFM_INPUT_MOUSEWHEEL and _ctrl(msg):
+                self.wheel_resize(msg.GetInt32(c4d.BFM_INPUT_VALUE))
+                return True
         return gui.GeDialog.Message(self, msg, result)
+
+    def _typing(self):
+        """True while the library path or the height field has the keyboard."""
+        for gid in (ID_LIBRARY, ID_DISP_SCALE):
+            try:
+                if self.IsActive(gid):
+                    return True
+            except Exception:
+                pass
+        return False
 
     def AskClose(self):
         self.save()

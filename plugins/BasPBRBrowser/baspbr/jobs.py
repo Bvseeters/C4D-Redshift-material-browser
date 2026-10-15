@@ -10,6 +10,7 @@ timer drains it on the main thread (where creating materials is allowed):
     ("scanned",    entries, error)                 the library was (re)read
     ("thumb",      key, path)                      thumbnail on disk, ready to draw
     ("thumb_make", key, color_map_path)            no thumbnail anywhere: draw one from the colour map
+    ("details",    key, [sizes], error)            the sizes a material really comes in
     ("progress",   key, fraction)                  download progress 0..1
     ("waiting",    key, holder)                    another PC is downloading this material
     ("done",       key, folder, maps, reused, asset, payload)
@@ -34,6 +35,7 @@ class Jobs(object):
         self._thumb_seen = set()
         self._cancel = threading.Event()
         self.pending = []               # asset keys queued or downloading, in order
+        self.wanted = None              # keys of the tiles in (or near) view; others' thumbnails wait
         self.busy_key = None
         for _ in range(thumb_threads):
             threading.Thread(target=self._thumb_loop, daemon=True).start()
@@ -65,6 +67,15 @@ class Jobs(object):
                 self.results.put(("categories", key, sources.SOURCES[source_id].categories(**kw), None))
             except Exception as exc:
                 self.results.put(("categories", key, [], message(exc)))
+        self._run(run)
+
+    def details(self, asset):
+        """Ask the site which sizes asset comes in (for the status line)."""
+        def run():
+            try:
+                self.results.put(("details", asset.key, sources.SOURCES[asset.source].available(asset), None))
+            except Exception as exc:
+                self.results.put(("details", asset.key, [], message(exc)))
         self._run(run)
 
     def scan(self):
@@ -138,6 +149,10 @@ class Jobs(object):
         while True:
             asset = self._thumbs.get()
             key = asset.key
+            wanted = self.wanted
+            if wanted is not None and key not in wanted:
+                self._thumb_seen.discard(key)   # scrolled past before its turn: asked again if it's back
+                continue
             try:
                 found, fetch = self._find_thumb(asset)
                 if found:

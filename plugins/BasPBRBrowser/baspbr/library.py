@@ -176,6 +176,18 @@ class Library(object):
         return os.path.join(base, asset.source_label, key + ext)
 
     # ---- what's already downloaded ---------------------------------------------
+    def resolutions(self, asset):
+        """The sizes of asset that are in the library already, e.g. ["4K", "8K"]."""
+        folder = os.path.join(self.root, asset.source_label)
+        prefix = safe_name(asset.name) + "_"
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            return []
+        return [n[len(prefix):] for n in names
+                if n.startswith(prefix) and re.fullmatch(r"\d+K", n[len(prefix):])
+                and os.path.isfile(os.path.join(folder, n, "asset.json"))]
+
     def find(self, asset, res):
         """(folder, maps) if this asset at this resolution is in the library, else None."""
         d = self.asset_dir(asset, res)

@@ -6,8 +6,18 @@ class GeUserArea(object):
         self.drawn = []
 
     def GetWidth(self): return 700
+    def GetHeight(self): return 600
     def LayoutChanged(self): pass
-    def Redraw(self): self.drawn = []; self.DrawMsg(0, 0, 700, 3000, None)
+    def Redraw(self): self.drawn = []; self.DrawMsg(0, 0, self.GetWidth(), self.GetHeight(), None)
+
+    # a mouse drag plays back DRAG_SCRIPT: [(result, dx, dy), ...]
+    def MouseDragStart(self, button, mx, my, flags): self._drag = list(DRAG_SCRIPT)
+    def MouseDrag(self):
+        if not self._drag:
+            return (c4d.MOUSEDRAGRESULT_FINISHED, 0, 0, None)
+        r, dx, dy = self._drag.pop(0)
+        return (r, dx, dy, None)
+    def MouseDragEnd(self): return True
     def OffScreenOn(self): pass
     def SetClippingRegion(self, *a): pass
     def GetColorRGB(self, cid): return {"r": 51, "g": 51, "b": 51}
@@ -42,6 +52,7 @@ class GeDialog(object):
     def GetFloat(self, gid): return self.v.get(gid, 0.0)
     def Enable(self, gid, on): self.enabled[gid] = on
     def Message(self, msg, result): return False
+    def IsActive(self, gid): return False
 
     # the scroll group: what's in view, in the grid's coordinates (tests move it)
     visible = None
@@ -66,6 +77,13 @@ class QuickTab(object):
 
 
 POPUP_CHOICE = [0]
+DRAG_SCRIPT = []
+CTRL_HELD = [False]       # what the keyboard says, for GetInputState
+
+
+def GetInputState(device, channel, res):
+    res[c4d.BFM_INPUT_QUALIFIER] = c4d.QCTRL if CTRL_HELD[0] else 0
+    return True
 MESSAGES = []
 INPUT_ANSWER = [None]
 
