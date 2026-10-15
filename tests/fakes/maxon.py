@@ -16,6 +16,7 @@ NODES = {
     CORE + "texturesampler": (["tex0", "scale", "offset"], ["outcolor", "outalpha"]),
     CORE + "bumpmap": (["input", "inputtype", "scale", "flipy"], ["out"]),
     CORE + "displacement": (["texmap", "scale"], ["out"]),
+    CORE + "rscolorsplitter": (["input"], ["outr", "outg", "outb", "outa"]),
 }
 
 

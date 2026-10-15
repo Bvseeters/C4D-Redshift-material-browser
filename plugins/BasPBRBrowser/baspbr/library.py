@@ -20,9 +20,11 @@ import time
 # Roles the Redshift builder understands, and the file-name tokens that mean
 # them. Order matters: a file is given the first role whose tokens match.
 ROLES = ("color", "normal_gl", "normal_dx", "roughness", "gloss", "metalness",
-         "ao", "height", "opacity", "emission")
+         "ao", "height", "opacity", "emission", "orm")
 
 _ROLE_TOKENS = [
+    # packed: R = ambient occlusion, G = roughness, B = metalness (AMD's "ORM", Poly Haven's "arm")
+    ("orm", ("orm", "arm", "occlusionroughnessmetallic", "occlusion_roughness_metallic")),
     ("normal_dx", ("normaldx", "nor_dx", "normal_dx", "normal-dx", "nrm_dx", "ndx")),
     ("normal_gl", ("normalgl", "nor_gl", "normal_gl", "normal-ogl", "normal_ogl", "normal-gl",
                    "normal", "nrm", "nor", "norm")),
@@ -36,13 +38,13 @@ _ROLE_TOKENS = [
     ("color", ("basecolor", "base_color", "base-color", "albedo", "diffuse", "color", "colour",
                "diff", "col", "basecol")),
 ]
-_SKIP = ("preview", "thumb", "thumbnail", "sphere", "cube", "arm", "orm", "rough_ao", "packed")
+_SKIP = ("preview", "thumb", "thumbnail", "sphere", "cube", "rough_ao", "packed")
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".exr", ".tga", ".webp")
 
 # canonical suffix written into file names
 SUFFIX = {"color": "Color", "normal_gl": "NormalGL", "normal_dx": "NormalDX", "roughness": "Roughness",
           "gloss": "Glossiness", "metalness": "Metalness", "ao": "AmbientOcclusion",
-          "height": "Displacement", "opacity": "Opacity", "emission": "Emission"}
+          "height": "Displacement", "opacity": "Opacity", "emission": "Emission", "orm": "ORM"}
 
 
 def classify(filename):

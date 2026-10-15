@@ -10,6 +10,8 @@ and from C4D 2023 onwards:
     Texture (Metalness, raw)     -> Standard Material . metalness
     Texture (Opacity, raw)       -> Standard Material . opacity_color
     Texture (Emission, sRGB)     -> Standard Material . emission_color
+    Texture (ORM, raw) -> Color Splitter . G -> refl_roughness, . B -> metalness
+      (packed map, used when there's no separate roughness / metalness map)
     Texture (Normal, raw) -> Bump Map (tangent-space normal) -> bump_input
       (no normal map: height -> Bump Map (height field), when asked for)
     Texture (Height, raw) -> Displacement -> Output . displacement (optional)
@@ -32,12 +34,13 @@ STANDARD = CORE + "standardmaterial"
 TEXTURE = CORE + "texturesampler"
 BUMPMAP = CORE + "bumpmap"
 DISPLACEMENT = CORE + "displacement"
+SPLITTER = CORE + "rscolorsplitter"
 RAW = "RS_INPUT_COLORSPACE_RAW"          # "" = Auto (sRGB for 8-bit colour images)
 
 NAME_ATTR = "net.maxon.node.base.name"
 
 # which maps are data (raw) rather than colour
-DATA_ROLES = ("roughness", "gloss", "metalness", "opacity", "normal_gl", "normal_dx", "height", "ao")
+DATA_ROLES = ("roughness", "gloss", "metalness", "opacity", "normal_gl", "normal_dx", "height", "ao", "orm")
 
 
 class Options(object):
@@ -193,7 +196,19 @@ def build(doc, name, maps, opts=None):
         if not to_std("roughness", "Roughness", "refl_roughness"):
             if to_std("gloss", "Glossiness", "refl_roughness"):
                 _set(_port(std, STANDARD + ".refl_isglossiness", False, problems), True)
-        to_std("metalness", "Metalness", "metalness")
+        has_metal = to_std("metalness", "Metalness", "metalness")
+        has_rough = "roughness" in maps or "gloss" in maps
+        if "orm" in maps and not (has_rough and has_metal):
+            split = graph.AddChild(maxon.Id(), maxon.Id(SPLITTER))
+            _name(split, "ORM channels")
+            _connect(texture("orm", "ORM (occlusion / roughness / metalness)"),
+                     _port(split, SPLITTER + ".input", False, problems))
+            if not has_rough:
+                _connect(_port(split, SPLITTER + ".outg", True, problems),
+                         _port(std, STANDARD + ".refl_roughness", False, problems))
+            if not has_metal:
+                _connect(_port(split, SPLITTER + ".outb", True, problems),
+                         _port(std, STANDARD + ".metalness", False, problems))
         to_std("opacity", "Opacity", "opacity_color")
         if to_std("emission", "Emission", "emission_color"):
             _set(_port(std, STANDARD + ".emission_weight", False, problems), 1.0)
@@ -260,6 +275,7 @@ CHECK = {
     TEXTURE: (("tex0", False), ("outcolor", True)),
     BUMPMAP: (("input", False), ("inputtype", False), ("scale", False), ("flipy", False), ("out", True)),
     DISPLACEMENT: (("texmap", False), ("scale", False), ("out", True)),
+    SPLITTER: (("input", False), ("outg", True), ("outb", True)),
 }
 
 

@@ -4,13 +4,18 @@ To release an update: raise VERSION, add a line or two under NOTES, commit and
 push to BRANCH. Every PC with the plugin offers it the next time someone opens
 the browser after starting Cinema 4D.
 """
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 
 REPO = "Bvseeters/C4D-Redshift-material-browser"
 BRANCH = "main"
 PLUGIN_DIR = "plugins/BasPBRBrowser"        # the plugin's folder inside the repository
 
 NOTES = {
+    "3.1.0": [
+        "AMD GPUOpen MaterialX Library added (454 materials, free for commercial use)",
+        "Everything tab: tick the sites to search - Ctrl-click searches just one",
+        "Packed ORM maps (occlusion / roughness / metalness) are wired through a Color Splitter",
+    ],
     "3.0.0": [
         "Endless scrolling instead of pages",
         "Ctrl + mouse wheel (or the Size slider) resizes thumbnails",

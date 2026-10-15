@@ -6,7 +6,7 @@ Workers never touch the c4d API. They put results on one queue; the dialog's
 timer drains it on the main thread (where creating materials is allowed):
 
     ("search",     token, assets, error)          every match, sorted; the grid shows them as you scroll
-    ("categories", source_id, [(key, label, count)], error)
+    ("categories", key, [(key, label, count)], error)   key: the source id, or the cache key asked for
     ("scanned",    entries, error)                 the library was (re)read
     ("thumb",      key, path)                      thumbnail on disk, ready to draw
     ("thumb_make", key, color_map_path)            no thumbnail anywhere: draw one from the colour map
@@ -43,22 +43,28 @@ class Jobs(object):
         threading.Thread(target=fn, daemon=True).start()
 
     # ---- searches, categories, the library ---------------------------------------------
-    def search(self, token, source_id, query, sort, category=sources.ALL):
+    def search(self, token, source_id, query, sort, category=sources.ALL, sites=None):
+        """sites: for Everything, the sites that are ticked (None = all)."""
+        kw = {"sites": sites} if sites is not None else {}
+
         def run():
             try:
-                assets = sources.SOURCES[source_id].search(query, sort, category)
+                assets = sources.SOURCES[source_id].search(query, sort, category, **kw)
                 self.results.put(("search", token, assets, None))
             except Exception as exc:
                 traceback.print_exc()
                 self.results.put(("search", token, [], message(exc)))
         self._run(run)
 
-    def categories(self, source_id):
+    def categories(self, source_id, sites=None, key=None):
+        kw = {"sites": sites} if sites is not None else {}
+        key = key or source_id
+
         def run():
             try:
-                self.results.put(("categories", source_id, sources.SOURCES[source_id].categories(), None))
+                self.results.put(("categories", key, sources.SOURCES[source_id].categories(**kw), None))
             except Exception as exc:
-                self.results.put(("categories", source_id, [], message(exc)))
+                self.results.put(("categories", key, [], message(exc)))
         self._run(run)
 
     def scan(self):

@@ -77,25 +77,45 @@ def _fit(area, text, width):
 
 # =====================================================================================
 class Categories(gui.GeUserArea):
-    """The sidebar: All, then the categories with their counts."""
+    """The sidebar. On the Everything tab it starts with a tick box per site (which
+    sites to search); then All and the categories with their counts."""
+    SEP = 10                  # gap between the sites and the categories
 
     def __init__(self, dialog):
         super(Categories, self).__init__()
         self.dialog = dialog
         self.rows = [(sources.ALL, "All", None)]
+        self.toggles = []         # [(site id, label, count or None, ticked)]
         self.selected = sources.ALL
         self.note = ""
 
-    def set_rows(self, cats, selected, note=""):
+    def set_rows(self, cats, selected, note="", toggles=None):
         self.rows = [(sources.ALL, "All", None)] + list(cats)
+        if toggles is not None:
+            self.toggles = list(toggles)
         keys = [r[0] for r in self.rows]
         self.selected = selected if selected in keys else sources.ALL
         self.note = note
         self.LayoutChanged()
         self.Redraw()
 
+    def set_toggles(self, toggles):
+        self.toggles = list(toggles)
+        self.LayoutChanged()
+        self.Redraw()
+
+    # row positions
+    def _top(self):
+        return 3 + (len(self.toggles) * ROW_H + self.SEP if self.toggles else 0)
+
+    def toggle_y(self, i):
+        return 3 + i * ROW_H
+
+    def row_y(self, i):
+        return self._top() + i * ROW_H
+
     def GetMinSize(self):
-        return SIDEBAR_W, ROW_H * (len(self.rows) + (2 if self.note else 0)) + 6
+        return SIDEBAR_W, self._top() + ROW_H * (len(self.rows) + (2 if self.note else 0)) + 6
 
     def DrawMsg(self, x1, y1, x2, y2, msg):
         self.OffScreenOn()
@@ -104,32 +124,57 @@ class Categories(gui.GeUserArea):
         self.DrawSetPen(bg * 0.85)
         self.DrawRectangle(x1, y1, x2, y2)
         w = self.GetWidth() or SIDEBAR_W
+        accent = c4d.Vector(0.98, 0.62, 0.16)
+
+        def count_text(count, y):
+            num = "" if count is None else str(count)
+            if num:
+                self.DrawSetTextCol(c4d.COLOR_TEXT_DISABLED, c4d.COLOR_TRANS)
+                self.DrawText(num, w - self.DrawGetTextWidth(num) - 8, y + 2)
+            return self.DrawGetTextWidth(num) if num else 0
+
+        if self.toggles:
+            self.DrawSetPen(bg * 0.72)                          # the sites, set apart
+            self.DrawRectangle(0, 0, w, self._top() - self.SEP // 2)
+        for i, (sid, label, count, on) in enumerate(self.toggles):
+            y = self.toggle_y(i)
+            self.DrawSetPen(c4d.Vector(0.12))                   # the tick box
+            self.DrawRectangle(8, y + 4, 19, y + 15)
+            self.DrawSetPen(accent if on else bg * 0.9)
+            self.DrawRectangle(10, y + 6, 17, y + 13)
+            numw = count_text(count, y)
+            self.DrawSetTextCol(c4d.COLOR_TEXT if on else c4d.COLOR_TEXT_DISABLED, c4d.COLOR_TRANS)
+            self.DrawText(_fit(self, label, w - numw - 40), 26, y + 2)
         for i, (key, label, count) in enumerate(self.rows):
-            y = 3 + i * ROW_H
+            y = self.row_y(i)
             if y > y2 or y + ROW_H < y1:
                 continue
             if key == self.selected:
-                self.DrawSetPen(c4d.Vector(0.98, 0.62, 0.16) * 0.55)
+                self.DrawSetPen(accent * 0.55)
                 self.DrawRectangle(0, y, w, y + ROW_H - 1)
             elif key.startswith("src:"):
                 self.DrawSetPen(bg * 0.72)                     # the source rows, set apart
                 self.DrawRectangle(0, y, w, y + ROW_H - 1)
+            numw = count_text(count, y)
             self.DrawSetTextCol(c4d.COLOR_TEXT, c4d.COLOR_TRANS)
-            num = "" if count is None else str(count)
-            numw = self.DrawGetTextWidth(num) if num else 0
             self.DrawText(_fit(self, label, w - numw - 22), 8, y + 2)
-            if num:
-                self.DrawSetTextCol(c4d.COLOR_TEXT_DISABLED, c4d.COLOR_TRANS)
-                self.DrawText(num, w - numw - 8, y + 2)
         if self.note:
             self.DrawSetTextCol(c4d.COLOR_TEXT_DISABLED, c4d.COLOR_TRANS)
-            self.DrawText(_fit(self, self.note, w - 12), 8, 3 + (len(self.rows) + 1) * ROW_H)
+            self.DrawText(_fit(self, self.note, w - 12), 8, self.row_y(len(self.rows) + 1))
 
     def InputEvent(self, msg):
         if msg[c4d.BFM_INPUT_DEVICE] != c4d.BFM_INPUT_MOUSE or msg[c4d.BFM_INPUT_CHANNEL] != c4d.BFM_INPUT_MOUSELEFT:
             return False
         local = self.Global2Local()
-        i = int((msg[c4d.BFM_INPUT_Y] + local["y"] - 3) // ROW_H)
+        y = msg[c4d.BFM_INPUT_Y] + local["y"]
+        if self.toggles and y < self._top():
+            i = int((y - 3) // ROW_H)
+            if 0 <= i < len(self.toggles):
+                solo = bool(msg.get(c4d.BFM_INPUT_QUALIFIER, 0) & c4d.QCTRL) if hasattr(msg, "get") \
+                    else bool(msg[c4d.BFM_INPUT_QUALIFIER] & c4d.QCTRL)
+                self.dialog.site_toggled(self.toggles[i][0], solo)
+            return True
+        i = int((y - self._top()) // ROW_H)
         if 0 <= i < len(self.rows) and self.rows[i][0] != self.selected:
             self.selected = self.rows[i][0]
             self.Redraw()
@@ -450,6 +495,48 @@ class BrowserDialog(gui.GeDialog):
         return sources.RESOLUTIONS[self.GetInt32(ID_RES)]
 
     @property
+    def sites(self):
+        """The sites the Everything tab searches (the ticked ones); None on other tabs."""
+        if self.tab != "everything":
+            return None
+        off = self.cfg.get("sites_off") or []
+        return tuple(s for s in sources.Everything.MEMBERS if s not in off)
+
+    def _cat_key(self):
+        return self.tab if self.tab != "everything" else "everything:" + ",".join(self.sites)
+
+    def _site_toggles(self):
+        counts = sources.SOURCES["everything"].site_counts()
+        on = self.sites
+        return [(s, sources.SOURCES[s].label, counts.get(s), s in on) for s in sources.Everything.MEMBERS]
+
+    def site_toggled(self, sid, solo=False):
+        """A site's tick box on the Everything tab. Ctrl-click: only that site (again: all)."""
+        members = sources.Everything.MEMBERS
+        on = list(self.sites)
+        if solo:
+            on = list(members) if on == [sid] else [sid]
+        elif sid in on:
+            if len(on) == 1:
+                self.status("At least one site has to stay ticked.")
+                return
+            on.remove(sid)
+        else:
+            on.append(sid)
+        self.cfg["sites_off"] = [s for s in members if s not in on]
+        self.cats.set_toggles(self._site_toggles())
+        self._show_categories()
+        self.search()
+
+    def _show_categories(self):
+        key = self._cat_key()
+        if key in self.cat_cache:
+            self.cats.set_rows(self.cat_cache[key], self.category)
+        else:
+            self.cats.set_rows([], self.category, "loading categories…")
+            self._load_categories()
+
+    @property
     def category(self):
         if not isinstance(self.cfg.get("category"), dict):
             self.cfg["category"] = {}
@@ -484,29 +571,30 @@ class BrowserDialog(gui.GeDialog):
             elif src.best_resolution != "8K" and src.id != "everything":
                 extra = "  ·  up to %s" % src.best_resolution
             self.SetString(ID_LICENCE, src.licence + extra)
+        self.cats.set_toggles(self._site_toggles() if self.tab == "everything" else [])
         if installed:
             self._installed_categories()
             if self.scanned:
                 self.jobs.scan()             # others may have added materials since
-        elif self.tab in self.cat_cache:
-            self.cats.set_rows(self.cat_cache[self.tab], self.category)
         else:
-            self.cats.set_rows([], sources.ALL, "loading categories…")
-            self._load_categories()
+            self._show_categories()
         if search:
             self.search()
 
     def _load_categories(self):
-        if self.tab not in self.cat_pending:
-            self.cat_pending.add(self.tab)
-            self.jobs.categories(self.tab)
+        key = self._cat_key()
+        if key not in self.cat_pending:
+            self.cat_pending.add(key)
+            self.jobs.categories(self.tab, self.sites, key)
 
-    def _categories_result(self, sid, cats, error):
-        self.cat_pending.discard(sid)
+    def _categories_result(self, key, cats, error):
+        self.cat_pending.discard(key)
         if not error:
-            self.cat_cache[sid] = cats
-        if sid != self.tab:
+            self.cat_cache[key] = cats
+        if key != self._cat_key():
             return
+        if self.tab == "everything":
+            self.cats.set_toggles(self._site_toggles())      # the counts are known now
         self.cats.set_rows(cats, self.category, ("categories unavailable: " + error) if error else "")
         if not error and self.category != sources.ALL and self.category not in [c[0] for c in cats]:
             self.cfg["category"][self.tab] = sources.ALL       # a category this site no longer has
@@ -623,7 +711,7 @@ class BrowserDialog(gui.GeDialog):
             if not self.scanned:
                 self.grid.set_items([])
                 return
-        elif not src.loaded():
+        elif not (src.loaded(self.sites) if self.tab == "everything" else src.loaded()):
             self.empty_text = ("Loading every site's catalogue (first time today, a few seconds)…"
                                if self.tab == "everything" else
                                "Loading the %s catalogue (first time today)…" % src.label)
@@ -631,7 +719,8 @@ class BrowserDialog(gui.GeDialog):
             self.empty_text = "Searching…"
         self.grid.set_items([])
         self.SetString(ID_COUNT, "")
-        self.jobs.search(self.token, self.tab, self.GetString(ID_QUERY).strip(), self._sort(), self.category)
+        self.jobs.search(self.token, self.tab, self.GetString(ID_QUERY).strip(), self._sort(), self.category,
+                         self.sites)
 
     def _search_result(self, token, assets, error):
         if token != self.token:
@@ -650,7 +739,7 @@ class BrowserDialog(gui.GeDialog):
         self.grid.set_items([])
         self.SetVisibleArea(ID_SCROLL, 0, 0, 10, 10)
         self._show_more()
-        if self.tab not in self.cat_cache and self.tab != "installed":
+        if self._cat_key() not in self.cat_cache and self.tab != "installed":
             self._load_categories()               # (again, if it failed) - instant now the catalogue is loaded
 
     def _show_more(self):
@@ -907,8 +996,8 @@ class BrowserDialog(gui.GeDialog):
                 self.save()
                 self.status("GitHub token %s." % ("saved" if text.strip() else "removed"))
         elif cid == ID_MENU_ABOUT:
-            gui.MessageDialog("BasPBR Browser %s\n\nambientCG, Poly Haven, ShareTextures and FreePBR as Redshift "
-                              "materials.\nUpdates: github.com/%s (%s)" % (version.VERSION, version.REPO, version.BRANCH))
+            gui.MessageDialog("BasPBR Browser %s\n\nambientCG, Poly Haven, ShareTextures, AMD GPUOpen and FreePBR "
+                              "as Redshift materials.\nUpdates: github.com/%s (%s)" % (version.VERSION, version.REPO, version.BRANCH))
         return True
 
     def Timer(self, msg):

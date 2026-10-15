@@ -2,7 +2,7 @@
 
 A Cinema 4D plugin for browsing free PBR materials and turning them into **Redshift node materials** with a double-click.
 
-Sources: **ambientCG**, **Poly Haven**, **ShareTextures** (all CC0) and **FreePBR** (non-commercial use only). The **Everything** tab searches all of them at once.
+Sources: **ambientCG**, **Poly Haven**, **ShareTextures** (all CC0), **AMD GPUOpen** (free, commercial use allowed) and **FreePBR** (non-commercial use only). The **Everything** tab searches all of them at once — tick the sites you want in the sidebar (Ctrl-click: just that one); categories with the same name are merged.
 
 ## Install
 
@@ -39,4 +39,5 @@ While this repository is private, every PC needs a read-only GitHub token, set u
 1. Raise `VERSION` and add notes in `plugins/BasPBRBrowser/baspbr/version.py`.
 2. Run `python tests/smoke_test.py` and `python tests/updater_test.py`.
 3. Run `python build.py`, which writes `dist/BasPBRBrowser.zip`.
-4. Push to `main`, then attach the zip to a GitHub release.
+4. Push, then run `python release.py . <branch>`. It publishes the zip as a GitHub release, using git's GitHub sign-in.
+5. Merge into `main`. Every PC is then offered the update.

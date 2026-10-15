@@ -13,6 +13,7 @@ DEFAULTS = {
     "displacement_scale": 1.0,
     "bump_from_height": True,
     "category": {},             # per tab
+    "sites_off": [],            # sites left out of the Everything tab
     "tile": 128,                # thumbnail size in pixels (Ctrl + mouse wheel)
     "github_token": "",         # only while the GitHub repository is private
 }

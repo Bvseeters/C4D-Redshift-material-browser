@@ -30,6 +30,7 @@ RAW_URL = "https://raw.githubusercontent.com/{repo}/{branch}/{path}"
 API_FILE = "https://api.github.com/repos/{repo}/contents/{path}?ref={branch}"
 ZIP_URL = "https://codeload.github.com/{repo}/zip/refs/heads/{branch}"
 API_ZIP = "https://api.github.com/repos/{repo}/zipball/{branch}"
+API_REPO = "https://api.github.com/repos/{repo}"
 
 
 def plugin_dir():
@@ -71,14 +72,32 @@ def remote_version(token=None, repo=None, branch=None):
     try:
         text = net.get_text(RAW_URL.format(repo=repo, branch=branch, path=path))
     except net.urllib.error.HTTPError as exc:
-        if exc.code != 404 or not token:
-            if exc.code == 404:
-                raise RuntimeError("GitHub says %s doesn't exist - is the repository private? "
-                                   "Then set a GitHub token (Help menu)." % repo)
+        if exc.code != 404:
             raise
-        text = net.get_text(API_FILE.format(repo=repo, branch=branch, path=path),
-                            headers=dict(_auth(token), Accept="application/vnd.github.raw"))
+        if not token:
+            if _repo_visible(repo):
+                raise RuntimeError("the %s branch of %s has no BasPBR Browser on it yet - "
+                                   "nothing has been released there" % (branch, repo))
+            raise RuntimeError("GitHub says %s doesn't exist - is the repository private? "
+                               "Then set a GitHub token (Help menu)." % repo)
+        try:
+            text = net.get_text(API_FILE.format(repo=repo, branch=branch, path=path),
+                                headers=dict(_auth(token), Accept="application/vnd.github.raw"))
+        except net.urllib.error.HTTPError as exc2:
+            if exc2.code == 404:
+                raise RuntimeError("no BasPBR Browser on the %s branch of %s (or the token can't read it)"
+                                   % (branch, repo))
+            raise
     return read_version_file(text)
+
+
+def _repo_visible(repo):
+    """True when the repository is public (so a 404 means the file isn't there)."""
+    try:
+        net.get_json(API_REPO.format(repo=repo))
+        return True
+    except Exception:
+        return False
 
 
 def check(token=None):

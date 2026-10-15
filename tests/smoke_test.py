@@ -5,7 +5,8 @@ bitmap loader refuses WebP, like Cinema 4D). Live network. Checks:
 
   * the plugin registers, the browser opens, the update popup shows once per session
   * Everything: every site in one list, sites mixed near the top, merged categories,
-    one search across all sites
+    one search across all sites; ticking sites off and on (Ctrl-click: only that
+    one) changes both the results and the merged categories
   * endless scrolling: more tiles arrive as the view nears the end
   * Ctrl + mouse wheel and the Size slider resize the tiles (one step per notch)
   * per site: categories arrive, filtering by one works, thumbnails load in a format
@@ -81,8 +82,8 @@ c4d.gui.QUESTION_ANSWER[0] = False          # "not now"
 dlg = ns["BrowserCommand"]()._dialog()
 dlg.CreateLayout()
 dlg.InitValues()
-check([t[1] for t in dlg.tabs.tabs] == ["Everything", "ambientCG", "Poly Haven", "ShareTextures", "FreePBR", "Installed"],
-      "tabs: Everything, 4 sites, Installed")
+check([t[1] for t in dlg.tabs.tabs] == ["Everything", "ambientCG", "Poly Haven", "ShareTextures", "AMD GPUOpen",
+                                       "FreePBR", "Installed"], "tabs: Everything, 5 sites, Installed")
 
 
 def pump(until, timeout=60):
@@ -128,9 +129,21 @@ def click_category(label):
     if i is None:
         return None
     msg = {c4d.BFM_INPUT_DEVICE: c4d.BFM_INPUT_MOUSE, c4d.BFM_INPUT_CHANNEL: c4d.BFM_INPUT_MOUSELEFT,
-           c4d.BFM_INPUT_X: 20, c4d.BFM_INPUT_Y: 3 + i * ui.ROW_H + 5}
+           c4d.BFM_INPUT_X: 20, c4d.BFM_INPUT_Y: dlg.cats.row_y(i) + 5, c4d.BFM_INPUT_QUALIFIER: 0}
     dlg.cats.InputEvent(msg)
     return rows[i]
+
+
+def click_site(sid, ctrl=False):
+    i = [t[0] for t in dlg.cats.toggles].index(sid)
+    msg = {c4d.BFM_INPUT_DEVICE: c4d.BFM_INPUT_MOUSE, c4d.BFM_INPUT_CHANNEL: c4d.BFM_INPUT_MOUSELEFT,
+           c4d.BFM_INPUT_X: 12, c4d.BFM_INPUT_Y: dlg.cats.toggle_y(i) + 5,
+           c4d.BFM_INPUT_QUALIFIER: c4d.QCTRL if ctrl else 0}
+    dlg.cats.InputEvent(msg)
+
+
+def ticked():
+    return {t[0] for t in dlg.cats.toggles if t[3]}
 
 
 def switch(tab):
@@ -159,12 +172,13 @@ def thumbs_shown(n=6):
 print("\nEverything:")
 t0 = time.time()
 check(pump(searched, 120), "every site's catalogue loaded in %.1fs: %d materials" % (time.time() - t0, len(dlg.results)))
-check(len(dlg.results) > 4000 and not dlg.source.failed, "more than 4000, no site failed %s" % (dlg.source.failed,))
-top = {a.source for a in dlg.results[:8]}
-check(top == set(sources.ONLINE), "'Mixed' deals the sites out in turn: top 8 come from %s" % sorted(top))
+check(len(dlg.results) > 5000 and not dlg.source.failed, "more than 5000, no site failed %s" % (dlg.source.failed,))
+top = {a.source for a in dlg.results[:10]}
+check(top == set(sources.ONLINE), "'Mixed' deals the sites out in turn: top 10 come from %s" % sorted(top))
 check(pump(lambda: len(dlg.cats.rows) > 20, 60), "merged categories: %d" % (len(dlg.cats.rows) - 1))
-labels = [r[1] for r in dlg.cats.rows]
-check(labels[1:5] == ["ambientCG", "Poly Haven", "ShareTextures", "FreePBR"], "sites listed first in the sidebar")
+check([t[1] for t in dlg.cats.toggles] == ["ambientCG", "Poly Haven", "ShareTextures", "AMD GPUOpen", "FreePBR"]
+      and ticked() == set(sources.ONLINE) and all(t[2] for t in dlg.cats.toggles),
+      "a ticked box per site above the categories, with counts: %s" % [(t[1], t[2]) for t in dlg.cats.toggles])
 check(pump(lambda: thumbs_shown(), 60), "thumbnails load (all sites, C4D-readable)")
 check(not c4d.bitmaps.REJECTED, "no thumbnail C4D couldn't read")
 
@@ -202,22 +216,46 @@ print("\nsearch and categories across sites:")
 dlg.SetString(ui.ID_QUERY, "marble")
 dlg.Command(ui.ID_QUERY, None)
 check(pump(lambda: searched() and all(a.matches("marble") for a in dlg.results), 10), "typing searches every site: %d results for 'marble'" % len(dlg.results))
-check(len({a.source for a in dlg.results}) >= 3, "from %s" % sorted({a.source for a in dlg.results}))
+check(len({a.source for a in dlg.results}) >= 4, "from %s" % sorted({a.source for a in dlg.results}))
 dlg.SetString(ui.ID_QUERY, "")
 dlg.search()
 pump(searched, 10)
 row = click_category("Wood")
 check(row is not None and row[2] > 300, "merged 'Wood' category: %s" % (row,))
 pump(lambda: searched() and len(dlg.results) == row[2], 10)
-check(len(dlg.results) == row[2] and len({a.source for a in dlg.results}) == 4,
-      "Wood shows %d materials from all four sites" % len(dlg.results))
-row = click_category("Poly Haven")
-pump(lambda: searched() and {a.source for a in dlg.results} == {"polyhaven"}, 10)
-check({a.source for a in dlg.results} == {"polyhaven"} and len(dlg.results) == row[2], "site row filters to one site")
+check(len(dlg.results) == row[2] and len({a.source for a in dlg.results}) == 5,
+      "Wood shows %d materials from all five sites" % len(dlg.results))
+wood_all = row[2]
+
+print("\nchoosing sites:")
+click_site("sharetextures")
+check(ticked() == set(sources.ONLINE) - {"sharetextures"}, "untick ShareTextures")
+check(pump(lambda: searched() and "sharetextures" not in {a.source for a in dlg.results}
+           and dlg.cats.rows[0][0] == sources.ALL and len(dlg.cats.rows) > 5, 20), "it's left out of the results")
+row = next((r for r in dlg.cats.rows if r[0] == "Wood"), None)
+check(row is not None and row[2] < wood_all and dlg.cats.selected == "Wood",
+      "merged categories recount: Wood %s -> %s, still selected" % (wood_all, row and row[2]))
+check(pump(lambda: searched() and len(dlg.results) == row[2], 10), "and the results follow: %d" % len(dlg.results))
 dlg.category_changed(sources.ALL)
+pump(searched, 10)
+click_site("amd", ctrl=True)
+check(ticked() == {"amd"}, "Ctrl-click AMD GPUOpen: only that site")
+check(pump(lambda: searched() and {a.source for a in dlg.results} == {"amd"} and "Wallpaper" in [r[0] for r in dlg.cats.rows], 30),
+      "%d AMD materials, categories just AMD's (%d)" % (len(dlg.results), len(dlg.cats.rows) - 1))
+click_site("amd")
+check(ticked() == {"amd"} and "stay ticked" in dlg.GetString(ui.ID_STATUS), "the last ticked site can't be unticked")
+click_site("amd", ctrl=True)
+check(ticked() == set(sources.ONLINE), "Ctrl-click it again: every site")
+pump(lambda: searched() and len({a.source for a in dlg.results}) == 5, 20)
+dlg.AskClose()
+with open(os.path.join(c4d.storage.PREFS, "baspbr_browser.json")) as f:
+    check(json.load(f).get("sites_off") == [], "remembered (none left out)")
+click_site("freepbr")
+check(dlg.cfg["sites_off"] == ["freepbr"], "leaving FreePBR out is remembered as sites_off")
+click_site("freepbr")
 
 # ---- each site ------------------------------------------------------------------------------
-CATEGORY = {"ambientcg": "Marble", "polyhaven": "Wood", "sharetextures": "Wood", "freepbr": "Wood"}
+CATEGORY = {"ambientcg": "Marble", "polyhaven": "Wood", "sharetextures": "Wood", "amd": "Wood", "freepbr": "Wood"}
 downloaded = []
 for sid in sources.ONLINE:
     print("\n%s:" % sid)
@@ -243,6 +281,15 @@ for sid in sources.ONLINE:
     if len(maxon.GRAPHS) > before:
         check_material(maxon.GRAPHS[-1], c4d.documents.DOC.materials[-1])
         downloaded.append(asset)
+        if sid == "amd":            # some AMD materials pack AO / roughness / metalness into one map
+            palm = next(a for a in sources.SOURCES["amd"].catalogue() if a.name == "Indigo Palm Wallpaper")
+            maps = sources.fetch(libmod.Library(LIB), palm, "1K")[1]
+            check("orm" in maps and "roughness" not in maps, "AMD's packed ORM map is kept: %s" % sorted(maps))
+            ui.rsmat.build(c4d.documents.DOC, palm.name, maps)
+            w = maxon.GRAPHS[-1].wires
+            check(any(a.startswith("rscolorsplitter") and b == "outg" and d == "refl_roughness" for a, b, c, d in w) and
+                  any(a.startswith("rscolorsplitter") and b == "outb" and d == "metalness" for a, b, c, d in w),
+                  "packed ORM map: green -> roughness, blue -> metalness through a Color Splitter")
     dlg.category_changed(sources.ALL)
 
 print("\nPoly Haven thumbnail repair:")
@@ -275,7 +322,7 @@ switch("installed")
 check(pump(lambda: dlg.scanned and len(dlg.grid.items) >= len(downloaded) + 1, 30),
       "lists %d materials (%d downloaded + 1 hand-made folder)" % (len(dlg.grid.items), len(downloaded)))
 labels = [r[1] for r in dlg.cats.rows]
-check(all(s in labels for s in ("ambientCG", "Poly Haven", "ShareTextures", "FreePBR", "Local")),
+check(all(s in labels for s in ("ambientCG", "Poly Haven", "ShareTextures", "AMD GPUOpen", "FreePBR", "Local")),
       "sidebar groups by source: %s" % labels[:7])
 click_category("Local")
 pump(lambda: len(dlg.grid.items) == 1, 10)

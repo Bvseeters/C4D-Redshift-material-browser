@@ -59,7 +59,12 @@ def branch_zip(v, complete=True):
     return buf.getvalue()
 
 
-SITE = {"private": False, "version": "3.1.0", "zip": b"", "auth_seen": []}
+MAJ, MIN, PAT = updater.as_tuple(version.VERSION)[:3]
+NEWER = "%d.%d.0" % (MAJ, MIN + 1)                 # what "GitHub" has
+NEWER_PATCH = "%d.%d.%d" % (MAJ, MIN, PAT + 10)     # e.g. 3.1.10 vs 3.1.9: numbers, not text
+OLDER = "%d.%d.%d" % (MAJ, MIN - 1, 99) if MIN else "%d.0.0" % (MAJ - 1)
+
+SITE = {"private": False, "no_release": False, "version": NEWER, "zip": b"", "auth_seen": []}
 
 
 class FakeGitHub(http.server.BaseHTTPRequestHandler):
@@ -77,8 +82,10 @@ class FakeGitHub(http.server.BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         if auth:
             SITE["auth_seen"].append((self.path.split("/")[1], auth))
+        if self.path.startswith("/api/repo/"):
+            return self.send(404) if SITE["private"] else self.send(200, b'{"name": "repo"}', "application/json")
         if self.path.startswith("/raw/"):
-            if SITE["private"]:
+            if SITE["private"] or SITE["no_release"]:
                 return self.send(404, b"404: Not Found")
             return self.send(200, version_py(SITE["version"]).encode())
         if self.path.startswith("/api/contents/"):
@@ -103,28 +110,39 @@ updater.RAW_URL = base + "/raw/{repo}/{branch}/{path}"
 updater.API_FILE = base + "/api/contents/{repo}/{path}?ref={branch}"
 updater.ZIP_URL = base + "/zip/{repo}/{branch}"
 updater.API_ZIP = base + "/api/zipball/{repo}/{branch}"
+updater.API_REPO = base + "/api/repo/{repo}"
 CACHE = tempfile.mkdtemp(prefix="baspbr_upd_cache_")
 updater.local_cache_dir = lambda: CACHE
 
 print("check:")
 info = updater.check()
-check(info and info["version"] == "3.1.0" and info["current"] == version.VERSION, "3.1.0 on GitHub is offered: %s" % (info,))
-check(info and info["notes"] == ["3.1.0: shiny new thing"], "only notes newer than %s" % version.VERSION)
+check(info and info["version"] == NEWER and info["current"] == version.VERSION, "%s on GitHub is offered: %s" % (NEWER, info))
+check(info and info["notes"] == ["%s: shiny new thing" % NEWER], "only notes newer than %s" % version.VERSION)
 SITE["version"] = version.VERSION
 check(updater.check() is None, "same version: nothing to do")
-SITE["version"] = "2.9.9"
+SITE["version"] = OLDER
 check(updater.check() is None, "older version on GitHub: nothing to do")
-SITE["version"] = "3.0.10"
-check(updater.as_tuple("3.0.10") > updater.as_tuple("3.0.9") and updater.check() is not None, "3.0.10 counts as newer than 3.0.9")
+SITE["version"] = NEWER_PATCH
+check(updater.as_tuple("3.0.10") > updater.as_tuple("3.0.9") and updater.check() is not None,
+      "%s counts as newer than %s" % (NEWER_PATCH, version.VERSION))
 
-SITE["private"], SITE["version"] = True, "3.1.0"
+SITE["no_release"] = True
+try:
+    updater.check()
+    check(False, "public repository, nothing on the branch yet: fails")
+except RuntimeError as exc:
+    check("no BasPBR Browser on it yet" in str(exc) and "private" not in str(exc),
+          "public repository, nothing on the branch yet: '%s'" % exc)
+SITE["no_release"] = False
+
+SITE["private"], SITE["version"] = True, NEWER
 try:
     updater.check()
     check(False, "private repository without token fails")
 except RuntimeError as exc:
     check("private" in str(exc) and "token" in str(exc), "private repository without token: '%s'" % exc)
 info = updater.check("test-token")
-check(info and info["version"] == "3.1.0", "with a token it reads through the API")
+check(info and info["version"] == NEWER, "with a token it reads through the API")
 check(("api", "Bearer test-token") in SITE["auth_seen"], "and sends the token only there: %s" % sorted({s for s, _ in SITE["auth_seen"]}))
 SITE["private"] = False
 
@@ -137,7 +155,7 @@ os.makedirs(os.path.join(installed, "baspbr", "__pycache__"), exist_ok=True)
 with open(os.path.join(installed, "baspbr", "__pycache__", "ui.cpython-311.pyc"), "wb") as f:
     f.write(b"x")
 
-SITE["zip"] = branch_zip("3.1.0", complete=False)
+SITE["zip"] = branch_zip(NEWER, complete=False)
 try:
     updater.install(target=installed)
     check(False, "an incomplete download is refused")
@@ -146,12 +164,12 @@ except RuntimeError as exc:
 check(os.path.isfile(os.path.join(installed, "baspbr", "dropped_in_new_version.py")) and
       not os.path.exists(os.path.join(CACHE, "backups")), "and nothing was touched")
 
-SITE["zip"] = branch_zip("3.1.0")
+SITE["zip"] = branch_zip(NEWER)
 seen = []
 new = updater.install(target=installed, progress=seen.append)
-check(new == "3.1.0", "installed %s" % new)
+check(new == NEWER, "installed %s" % new)
 with open(os.path.join(installed, "baspbr", "version.py")) as f:
-    check('VERSION = "3.1.0"' in f.read(), "version.py is the new one")
+    check('VERSION = "%s"' % NEWER in f.read(), "version.py is the new one")
 check(os.path.isfile(os.path.join(installed, "baspbr", "brand_new.py")), "new files arrive")
 check(not os.path.exists(os.path.join(installed, "baspbr", "dropped_in_new_version.py")), "files the new version dropped are removed")
 check(os.path.isfile(os.path.join(installed, "BasPBRBrowser.pyp")) and os.path.isfile(os.path.join(installed, "res", "icon.png")),

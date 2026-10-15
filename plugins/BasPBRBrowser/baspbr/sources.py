@@ -121,6 +121,8 @@ _SYNONYMS = {
     "paper product": "paper", "paper": "paper", "countertop": "countertop",
     "surface imperfection": "imperfections", "imperfection": "imperfections",
     "gem": "gems", "animal": "animals", "leather": "leather", "gravel": "gravel",
+    "flooring": "floor", "interior flooring": "floor", "exterior flooring": ("floor", "paving"),
+    "marble tile": ("marble", "tiles"), "brick wall": ("brick", "wall"), "fabric": "fabric",
 }
 _LABELS = {"sci-fi": "Sci-Fi", "man-made": "Man-made", "wood floor": "Wood Floor"}
 
@@ -152,10 +154,11 @@ def canon_categories(cats):
             words = part.split()
             words[-1] = _singular(words[-1])
             key = " ".join(words)
-            key = _SYNONYMS.get(key, _SYNONYMS.get(key.replace(" ", ""), key))
-            label = _LABELS.get(key) or key.title()
-            if label not in out:
-                out.append(label)
+            keys = _SYNONYMS.get(key, _SYNONYMS.get(key.replace(" ", ""), key))
+            for key in (keys if isinstance(keys, tuple) else (keys,)):
+                label = _LABELS.get(key) or key.title()
+                if label not in out:
+                    out.append(label)
     return out
 
 
@@ -511,57 +514,132 @@ class ShareTextures(Source):
 
 
 # =====================================================================================
+class AMDMatLib(Source):
+    """AMD's MaterialX Library (matlib.gpuopen.com). Each material comes in packages
+    of 1K/2K/4K at 8 or 16 bit: a .mtlx plus textures, with ambient occlusion,
+    roughness and metalness packed into one ORM map."""
+    id = "amd"
+    label = "AMD GPUOpen"
+    licence = "Free, commercial use allowed (AMD MaterialX Library)"
+    sorts = ("Newest", "Name")
+    best_resolution = "4K"
+    API = "https://api.matlib.gpuopen.com/api/"
+    PAGE = "https://matlib.gpuopen.com/main/materials/all?material="
+
+    def _pages(self, path):
+        out, url = [], self.API + path
+        while url:
+            data = net.get_json(url)
+            out += data.get("results") or []
+            url = data.get("next")
+        return out
+
+    def fetch_catalogue(self):
+        cats = {c["id"]: c["title"] for c in self._pages("categories/?limit=100")}
+        tags = {t["id"]: t["title"] for t in self._pages("tags/?limit=1000")}
+        out = []
+        for m in self._pages("materials/?limit=500"):
+            if m.get("status", "Published") != "Published" or not m.get("packages"):
+                continue
+            renders = m.get("renders_order") or m.get("renders") or []
+            cat = cats.get(m.get("category"))
+            out.append(Asset(self.id, m["id"], (m.get("title") or m["id"]).strip(),
+                             self.API + "renders/%s/download_thumbnail/" % renders[0] if renders else "",
+                             tags=[tags[t] for t in m.get("tags") or [] if t in tags],
+                             categories=[cat] if cat else [], page_url=self.PAGE + m["id"], max_res="4K",
+                             extra={"date": _timestamp(m.get("published_date") or m.get("created_date")),
+                                    "packages": m["packages"]}))
+        return out
+
+    @staticmethod
+    def pick(packages, res):
+        """packages: [(k, bits, info)]. 8 bit is plenty for these maps; the largest
+        size up to res, else the smallest there is."""
+        eight = [p for p in packages if p[1] == 8] or packages
+        want = _res_value(res)
+        fits = [p for p in eight if p[0] <= want]
+        return max(fits, key=lambda p: p[0]) if fits else min(eight, key=lambda p: p[0])
+
+    def download(self, asset, res, work, progress, cancel):
+        ids = asset.extra.get("packages") or net.get_json(self.API + "materials/%s/" % asset.id).get("packages") or []
+        packages = []
+        for pid in ids:
+            info = net.get_json(self.API + "packages/%s/" % pid)
+            m = re.match(r"\s*(\d+)\s*k\s*(\d+)\s*b", info.get("label") or "", re.I)
+            if m and info.get("file_url"):
+                packages.append((int(m.group(1)), int(m.group(2)), info))
+        if not packages:
+            raise RuntimeError("AMD has no texture package for " + asset.name)
+        k, bits, info = self.pick(packages, res)
+        size = re.match(r"([\d.]+)\s*MB", info.get("size") or "")
+        total = float(size.group(1)) * 1e6 if size else 50e6
+        zpath = os.path.join(work, "download.zip")
+        net.download(info["file_url"], zpath, lambda d, t: progress(d / float(t or total)), cancel)
+        return _extract_maps(zpath, work)
+
+
+# =====================================================================================
 class Everything(Source):
-    """Every online source in one list. Categories merged by name."""
+    """Every online source in one list, or the ones ticked in the sidebar.
+    Categories are merged by name across whichever sites are in."""
     id = "everything"
     label = "Everything"
-    licence = "ambientCG, Poly Haven and ShareTextures are CC0; FreePBR is for non-commercial use"
+    licence = "ambientCG, Poly Haven and ShareTextures are CC0; AMD is free; FreePBR is for non-commercial use"
     sorts = ("Mixed", "Newest", "Name")
-    MEMBERS = ("ambientcg", "polyhaven", "sharetextures", "freepbr")
+    MEMBERS = ("ambientcg", "polyhaven", "sharetextures", "amd", "freepbr")
 
-    def catalogue(self, refresh=False):
-        """All member catalogues, loaded side by side. Sources that fail are left out
-        (and listed in self.failed) rather than sinking the whole view."""
-        results, self.failed = {}, []
+    def __init__(self):
+        Source.__init__(self)
+        self.failed = []
+
+    def _sites(self, sites):
+        return [s for s in self.MEMBERS if sites is None or s in sites]
+
+    def catalogue(self, refresh=False, sites=None):
+        """The chosen sites' catalogues, loaded side by side. Sites that fail are left
+        out (and listed in self.failed) rather than sinking the whole view."""
+        results, failed = {}, []
+        members = self._sites(sites)
 
         def load(sid):
             try:
                 results[sid] = SOURCES[sid].catalogue(refresh)
             except Exception as exc:
-                self.failed.append("%s (%s)" % (SOURCES[sid].label, exc))
+                failed.append("%s (%s)" % (SOURCES[sid].label, exc))
 
-        threads = [threading.Thread(target=load, args=(sid,), daemon=True) for sid in self.MEMBERS]
+        threads = [threading.Thread(target=load, args=(sid,), daemon=True) for sid in members]
         [t.start() for t in threads]
         [t.join(120) for t in threads]
+        self.failed = failed
         out = []
-        for sid in self.MEMBERS:
+        for sid in members:
             for a in results.get(sid, []):
                 if "canon" not in a.extra:
                     a.extra["canon"] = canon_categories(a.categories)
                 out.append(a)
         return out
 
-    def loaded(self):
-        return all(SOURCES[s].loaded() for s in self.MEMBERS)
+    def loaded(self, sites=None):
+        return all(SOURCES[s].loaded() for s in self._sites(sites))
 
     def refresh(self):
         for s in self.MEMBERS:
             SOURCES[s].refresh()
 
-    def categories(self):
-        assets = self.catalogue()
-        by_source = {}
+    def site_counts(self):
+        """{site: number of materials, or None while its catalogue isn't loaded}"""
+        return {s: (len(SOURCES[s]._all) if SOURCES[s].loaded() else None) for s in self.MEMBERS}
+
+    def categories(self, sites=None):
         counts = {}
-        for a in assets:
-            by_source[a.source] = by_source.get(a.source, 0) + 1
+        for a in self.catalogue(sites=sites):
             for c in a.extra["canon"]:
                 counts[c] = counts.get(c, 0) + 1
-        rows = [("src:" + s, SOURCES[s].label, by_source[s]) for s in self.MEMBERS if s in by_source]
-        return rows + sorted(((c, c, n) for c, n in counts.items() if n >= 2), key=lambda r: r[1].lower())
+        return sorted(((c, c, n) for c, n in counts.items() if n >= 2), key=lambda r: r[1].lower())
 
-    def search(self, query, sort, category=ALL):
+    def search(self, query, sort, category=ALL, sites=None):
         items = []
-        for a in self.catalogue():
+        for a in self.catalogue(sites=sites):
             if category.startswith("src:"):
                 if a.source != category[4:]:
                     continue
@@ -570,12 +648,11 @@ class Everything(Source):
             if a.matches(query):
                 items.append(a)
         if sort == "Mixed":
-            # each site in its own popularity order, then dealt out in turn, so every
-            # site shows up near the top
+            # each site in its own popularity (or newest-first) order, dealt out in
+            # turn, so every site shows up near the top
             lanes = [sorted((a for a in items if a.source == s), key=lambda a: -a.extra.get("pop", a.extra.get("date", 0)))
                      for s in self.MEMBERS]
-            items = [a for row in _interleave(lanes) for a in row]
-            return items
+            return [a for row in _interleave(lanes) for a in row]
         return Source.sort(self, items, sort)
 
 
@@ -678,8 +755,9 @@ def _extract_maps(zpath, work):
     return maps
 
 
-SOURCES = {s.id: s for s in (Everything(), AmbientCG(), PolyHaven(), FreePBR(), ShareTextures(), Installed())}
-ONLINE = ("ambientcg", "polyhaven", "sharetextures", "freepbr")
+SOURCES = {s.id: s for s in (Everything(), AmbientCG(), PolyHaven(), FreePBR(), ShareTextures(), AMDMatLib(),
+                              Installed())}
+ONLINE = ("ambientcg", "polyhaven", "sharetextures", "amd", "freepbr")
 TABS = ("everything",) + ONLINE + ("installed",)
 
 
