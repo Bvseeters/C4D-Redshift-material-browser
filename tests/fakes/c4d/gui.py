@@ -32,7 +32,7 @@ class GeDialog(object):
 
     def AddChild(self, gid, sub, s): self.children.setdefault(gid, []).append((sub, s))
     def FreeChildren(self, gid): self.children[gid] = []
-    def SetInt32(self, gid, v): self.v[gid] = v
+    def SetInt32(self, gid, v, *a): self.v[gid] = v
     def GetInt32(self, gid): return self.v.get(gid, 0)
     def SetString(self, gid, v): self.v[gid] = v
     def GetString(self, gid): return self.v.get(gid, "")
@@ -41,6 +41,14 @@ class GeDialog(object):
     def SetFloat(self, gid, v, *a): self.v[gid] = v
     def GetFloat(self, gid): return self.v.get(gid, 0.0)
     def Enable(self, gid, on): self.enabled[gid] = on
+    def Message(self, msg, result): return False
+
+    # the scroll group: what's in view, in the grid's coordinates (tests move it)
+    visible = None
+    def GetVisibleArea(self, gid):
+        return dict(self.visible or {"x1": 0, "y1": 0, "x2": 700, "y2": 600})
+    def SetVisibleArea(self, gid, x1, y1, x2, y2):
+        self.visible = {"x1": 0, "y1": 0, "x2": 700, "y2": 600}
 
     def AddCustomGui(self, gid, kind, name, flags, w, h, bc):
         self.quicktab = QuickTab()
@@ -58,6 +66,18 @@ class QuickTab(object):
 
 
 POPUP_CHOICE = [0]
+MESSAGES = []
+INPUT_ANSWER = [None]
+
+
+def MessageDialog(text, type=0):
+    MESSAGES.append(text)
+    return True
+
+
+def InputDialog(title, preset=""):
+    return INPUT_ANSWER[0]
+
 QUESTION_ANSWER = [False]
 QUESTIONS = []
 

@@ -1,12 +1,11 @@
 """BasPBR Browser - a Cinema 4D plugin.
 
-Browse ambientCG, Poly Haven and FreePBR, and turn any material into a
-Redshift node material (Standard Material, normal, roughness, metalness,
-optional displacement) with one double-click. Downloads are kept in a local
-library so a material is only ever downloaded once.
+Browse ambientCG, Poly Haven, ShareTextures and FreePBR, and turn any material
+into a Redshift node material with one double-click. Downloads are kept in a
+library folder (which can be shared on the network), so a material is only
+ever downloaded once.
 
-Extensions > BasPBR Browser.
-Port of the WhateverWall Unity material browser; the library code is in ./baspbr.
+Extensions > BasPBR Browser. The code is in ./baspbr.
 """
 import os
 import sys
@@ -47,5 +46,5 @@ if __name__ == "__main__":
         icon = None
     c4d.plugins.RegisterCommandPlugin(
         id=PLUGIN_ID, str="BasPBR Browser", info=0, icon=icon,
-        help="BasPBR Browser: ambientCG, Poly Haven and FreePBR as Redshift materials",
+        help="BasPBR Browser: free PBR materials as Redshift materials",
         dat=BrowserCommand())

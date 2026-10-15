@@ -5,7 +5,7 @@ network library can be slow to list). Plain Python.
 Workers never touch the c4d API. They put results on one queue; the dialog's
 timer drains it on the main thread (where creating materials is allowed):
 
-    ("search",     token, assets, total, error)
+    ("search",     token, assets, error)          every match, sorted; the grid shows them as you scroll
     ("categories", source_id, [(key, label, count)], error)
     ("scanned",    entries, error)                 the library was (re)read
     ("thumb",      key, path)                      thumbnail on disk, ready to draw
@@ -29,7 +29,7 @@ class Jobs(object):
     def __init__(self, library, thumb_threads=4):
         self.library = library
         self.results = queue.Queue()
-        self._thumbs = queue.Queue()
+        self._thumbs = queue.LifoQueue()        # newest first: what's in view right now
         self._downloads = queue.Queue()
         self._thumb_seen = set()
         self._cancel = threading.Event()
@@ -43,13 +43,14 @@ class Jobs(object):
         threading.Thread(target=fn, daemon=True).start()
 
     # ---- searches, categories, the library ---------------------------------------------
-    def search(self, token, source_id, query, sort, page, page_size, category=sources.ALL):
+    def search(self, token, source_id, query, sort, category=sources.ALL):
         def run():
             try:
-                assets, total = sources.SOURCES[source_id].search(query, sort, page, page_size, category)
-                self.results.put(("search", token, assets, total, None))
+                assets = sources.SOURCES[source_id].search(query, sort, category)
+                self.results.put(("search", token, assets, None))
             except Exception as exc:
-                self.results.put(("search", token, [], 0, message(exc)))
+                traceback.print_exc()
+                self.results.put(("search", token, [], message(exc)))
         self._run(run)
 
     def categories(self, source_id):
@@ -79,21 +80,29 @@ class Jobs(object):
     def forget_thumbs(self):
         self._thumb_seen = set()
 
+    def forget_thumb(self, key):
+        self._thumb_seen.discard(key)
+
     def thumb(self, asset):
-        """Make sure asset's thumbnail is on disk; posts ("thumb", key, path) when it is."""
+        """Make sure asset's thumbnail is on disk; posts ("thumb", key, path) when it is.
+        Cheap: the grid calls it for every tile it draws. The newest requests are
+        served first, so the tiles in view load before ones scrolled past."""
         if asset.key in self._thumb_seen:
             return
         self._thumb_seen.add(asset.key)
+        self._thumbs.put(asset)
+
+    def _find_thumb(self, asset):
+        """(path on disk, None) or (None, (url, path to download to)) or (None, None).
+        Worker thread: the library may be a slow share."""
         if asset.source == "installed":
-            self._installed_thumb(asset)
-            return
+            return self._installed_thumb(asset)
         if not asset.thumb_url:
-            return
+            return None, None
         path = self.library.thumb_path(asset)
         if os.path.isfile(path) and image_kind(path) in ("png", "jpg"):
-            self.results.put(("thumb", asset.key, path))
-        else:
-            self._thumbs.put((asset.key, asset.thumb_url, path))   # missing, or a WebP C4D can't read
+            return path, None
+        return None, (asset.thumb_url, path)      # missing, or a WebP C4D can't read
 
     def _installed_thumb(self, asset):
         e = asset.extra["entry"]
@@ -106,27 +115,34 @@ class Jobs(object):
                 candidates += [os.path.join(base, label, key + ext) for ext in (".png", ".jpg")]
         for c in candidates:
             if c and os.path.isfile(c) and image_kind(c) in ("png", "jpg"):
-                self.results.put(("thumb", asset.key, c))
-                return
+                return c, None
         if e.get("thumb_url"):
             url = e["thumb_url"]
             if "polyhaven" in url:
                 url = sources.PolyHaven.png_thumb(url, e["id"])
             path = os.path.join(local_cache_dir(), "thumbs", "installed", _safe(asset.id) + ".png")
             if os.path.isfile(path) and image_kind(path) in ("png", "jpg"):
-                self.results.put(("thumb", asset.key, path))
-            else:
-                self._thumbs.put((asset.key, url, path))
-        elif e.get("maps", {}).get("color"):
+                return path, None
+            return None, (url, path)
+        if e.get("maps", {}).get("color"):
             self.results.put(("thumb_make", asset.key, e["maps"]["color"]))
+        return None, None
 
     def _thumb_loop(self):
         while True:
-            key, url, path = self._thumbs.get()
+            asset = self._thumbs.get()
+            key = asset.key
             try:
+                found, fetch = self._find_thumb(asset)
+                if found:
+                    self.results.put(("thumb", key, found))
+                    continue
+                if not fetch:
+                    continue
+                url, path = fetch
                 if os.path.isfile(path):
                     os.remove(path)
-                net.download(url, path)
+                net.download(url, path, headers=sources.THUMB_HEADERS)
                 if image_kind(path) in ("png", "jpg"):
                     self.results.put(("thumb", key, path))
                 else:

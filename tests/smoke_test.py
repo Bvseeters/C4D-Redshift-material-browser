@@ -3,9 +3,13 @@
 Runs the real plugin code against fake c4d/maxon modules (tests/fakes; the fake
 bitmap loader refuses WebP, like Cinema 4D). Live network. Checks:
 
-  * the plugin registers and the browser opens
-  * per online source: categories arrive, filtering by one works, thumbnails
-    load (including repairing a WebP thumbnail left in the cache by v1), a
+  * the plugin registers, the browser opens, the update popup shows once per session
+  * Everything: every site in one list, sites mixed near the top, merged categories,
+    one search across all sites
+  * endless scrolling: more tiles arrive as the view nears the end
+  * Ctrl + mouse wheel and the Size slider resize the tiles (one step per notch)
+  * per site: categories arrive, filtering by one works, thumbnails load in a format
+    C4D reads (including repairing a WebP thumbnail an old version cached), a
     double-clicked material downloads and becomes a correctly wired Redshift
     material assigned to the selection
   * Installed tab: lists the library (plugin downloads + a hand-made folder),
@@ -35,7 +39,7 @@ import maxon    # noqa: E402
 
 LIB = tempfile.mkdtemp(prefix="baspbr_lib_")
 with open(os.path.join(c4d.storage.PREFS, "baspbr_browser.json"), "w") as f:
-    json.dump({"library": LIB, "resolution": "1K", "source": "ambientcg", "query": "",
+    json.dump({"library": LIB, "resolution": "1K", "source": "everything", "query": "",
                "assign": True, "displacement": True}, f)
 
 failures = []
@@ -52,19 +56,33 @@ ns = runpy.run_path(os.path.join(PLUGIN, "BasPBRBrowser.pyp"), run_name="__main_
 print("registration:")
 check(len(c4d.plugins.REGISTERED) == 1 and c4d.plugins.REGISTERED[0]["id"] == 1000005, "command plugin registered")
 
-from baspbr import library as libmod, net, sources, ui  # noqa: E402
+from baspbr import library as libmod, net, sources, ui, updater  # noqa: E402
 
-# v1 cached Poly Haven thumbnails as WebP under a .png name; plant one to see it repaired
-ph_first = sorted(sources.PolyHaven()._catalogue(), key=lambda a: a.name.lower())[0]
+# an old version cached Poly Haven thumbnails as WebP under a .png name; plant one to see it repaired
+ph_first = sorted(sources.SOURCES["polyhaven"].catalogue(), key=lambda a: a.name.lower())[0]
 webp = os.path.join(LIB, "_thumbs", "Poly Haven", ph_first.id + ".png")
 os.makedirs(os.path.dirname(webp), exist_ok=True)
 net.download("https://cdn.polyhaven.com/asset_img/thumbs/%s.png?width=256&height=256&format=webp" % ph_first.id, webp)
 check(libmod.image_kind(webp) == "webp", "planted a WebP thumbnail like v1 left behind")
 
+# GitHub is asked once per session; pretend it has something newer
+asked = []
+real_check = updater.check
+
+
+def fake_check(token=None):
+    asked.append(token)
+    return {"version": "9.9.9", "current": "3.0.0", "notes": ["9.9.9: something new"]}
+
+
+updater.check = fake_check
+c4d.gui.QUESTION_ANSWER[0] = False          # "not now"
+
 dlg = ns["BrowserCommand"]()._dialog()
 dlg.CreateLayout()
 dlg.InitValues()
-check([t[1] for t in dlg.tabs.tabs] == ["ambientCG", "Poly Haven", "FreePBR", "Installed"], "tabs: 3 sources + Installed")
+check([t[1] for t in dlg.tabs.tabs] == ["Everything", "ambientCG", "Poly Haven", "ShareTextures", "FreePBR", "Installed"],
+      "tabs: Everything, 4 sites, Installed")
 
 
 def pump(until, timeout=60):
@@ -77,11 +95,30 @@ def pump(until, timeout=60):
     return False
 
 
+print("\nupdates:")
+check(pump(lambda: any("9.9.9" in q for q in c4d.gui.QUESTIONS), 10), "first open: 'BasPBR Browser 9.9.9 is available' popup")
+dlg2 = ui.BrowserDialog()
+dlg2.CreateLayout()
+dlg2.InitValues()
+time.sleep(0.3)
+check(len(asked) == 1, "opening it again in the same session doesn't ask GitHub again")
+dlg2.jobs.cancel_all()
+updater.check = real_check
+c4d.gui.QUESTIONS.clear()
+
+
 def click(i, double=False):
     x, y = dlg.grid.tile_rect(i)
     msg = {c4d.BFM_INPUT_DEVICE: c4d.BFM_INPUT_MOUSE, c4d.BFM_INPUT_CHANNEL: c4d.BFM_INPUT_MOUSELEFT,
            c4d.BFM_INPUT_X: x + 30, c4d.BFM_INPUT_Y: y + 30, c4d.BFM_INPUT_QUALIFIER: 0,
            c4d.BFM_INPUT_DOUBLECLICK: double}
+    return dlg.grid.InputEvent(msg)
+
+
+def wheel(value, ctrl=True):
+    msg = {c4d.BFM_INPUT_DEVICE: c4d.BFM_INPUT_MOUSE, c4d.BFM_INPUT_CHANNEL: c4d.BFM_INPUT_MOUSEWHEEL,
+           c4d.BFM_INPUT_VALUE: value, c4d.BFM_INPUT_QUALIFIER: c4d.QCTRL if ctrl else 0,
+           c4d.BFM_INPUT_X: 50, c4d.BFM_INPUT_Y: 50}
     return dlg.grid.InputEvent(msg)
 
 
@@ -101,6 +138,10 @@ def switch(tab):
     dlg.Command(ui.ID_TABS, None)
 
 
+def searched():
+    return not dlg.searching and dlg.grid.items
+
+
 def check_material(graph, mat):
     ends = {(c.split("<")[0], d) for a, b, c, d in graph.wires}
     check(("output", "surface") in ends and ("standardmaterial", "base_color") in ends and
@@ -110,60 +151,133 @@ def check_material(graph, mat):
     check(any(t.get(c4d.TEXTURETAG_MATERIAL) is mat for t in tags), "assigned to the selected objects")
 
 
-CATEGORY = {"ambientcg": "Marble", "polyhaven": "Wood", "freepbr": "Wood"}
+def thumbs_shown(n=6):
+    return sum(1 for a in dlg.grid.items[:30] if a.key in ui._bitmaps) >= min(n, len(dlg.grid.items))
+
+
+# ---- Everything ---------------------------------------------------------------------------
+print("\nEverything:")
+t0 = time.time()
+check(pump(searched, 120), "every site's catalogue loaded in %.1fs: %d materials" % (time.time() - t0, len(dlg.results)))
+check(len(dlg.results) > 4000 and not dlg.source.failed, "more than 4000, no site failed %s" % (dlg.source.failed,))
+top = {a.source for a in dlg.results[:8]}
+check(top == set(sources.ONLINE), "'Mixed' deals the sites out in turn: top 8 come from %s" % sorted(top))
+check(pump(lambda: len(dlg.cats.rows) > 20, 60), "merged categories: %d" % (len(dlg.cats.rows) - 1))
+labels = [r[1] for r in dlg.cats.rows]
+check(labels[1:5] == ["ambientCG", "Poly Haven", "ShareTextures", "FreePBR"], "sites listed first in the sidebar")
+check(pump(lambda: thumbs_shown(), 60), "thumbnails load (all sites, C4D-readable)")
+check(not c4d.bitmaps.REJECTED, "no thumbnail C4D couldn't read")
+
+print("\nendless scrolling:")
+first = len(dlg.grid.items)
+check(first == ui.CHUNK and first < len(dlg.results), "starts with %d tiles of %d" % (first, len(dlg.results)))
+pump(lambda: False, 0.3)
+check(len(dlg.grid.items) == first, "nothing more while the view is at the top")
+dlg.visible = {"x1": 0, "y1": dlg.grid.content_height() - 600, "x2": 700, "y2": dlg.grid.content_height()}
+check(pump(lambda: len(dlg.grid.items) > first, 5), "scrolled to the end: %d more tiles arrive" % (len(dlg.grid.items) - first))
+check(dlg.GetString(ui.ID_COUNT).startswith("%d materials" % len(dlg.results)), "count: '%s'" % dlg.GetString(ui.ID_COUNT))
+
+print("\nthumbnail size:")
+t = dlg.grid.tile
+wheel(120)
+check(dlg.grid.tile == t + ui.TILE_STEP and dlg.GetInt32(ui.ID_SIZE) == t + ui.TILE_STEP,
+      "Ctrl + wheel up: %d -> %d px, slider follows" % (t, dlg.grid.tile))
+time.sleep(0.05)
+bc = c4d.BaseContainer(c4d.BFM_INPUT)
+bc.update({c4d.BFM_INPUT_CHANNEL: c4d.BFM_INPUT_MOUSEWHEEL, c4d.BFM_INPUT_QUALIFIER: c4d.QCTRL, c4d.BFM_INPUT_VALUE: -120})
+wheel(-120)
+dlg.Message(bc, None)                     # the same notch reaching the dialog too
+check(dlg.grid.tile == t, "one notch down seen by grid and dialog: one step (%d px)" % dlg.grid.tile)
+check(wheel(120, ctrl=False) is False and dlg.grid.tile == t, "a plain wheel scrolls instead")
+dlg.SetInt32(ui.ID_SIZE, 300)
+dlg.Command(ui.ID_SIZE, None)
+check(dlg.grid.tile == 300 and dlg.grid.cols == 2, "Size slider: 300 px, %d columns" % dlg.grid.cols)
+for _ in range(30):
+    time.sleep(0.011)
+    wheel(-120)
+check(dlg.grid.tile == ui.TILE_MIN, "never smaller than %d px" % ui.TILE_MIN)
+dlg.set_tile_size(128)
+
+print("\nsearch and categories across sites:")
+dlg.SetString(ui.ID_QUERY, "marble")
+dlg.Command(ui.ID_QUERY, None)
+check(pump(lambda: searched() and all(a.matches("marble") for a in dlg.results), 10), "typing searches every site: %d results for 'marble'" % len(dlg.results))
+check(len({a.source for a in dlg.results}) >= 3, "from %s" % sorted({a.source for a in dlg.results}))
+dlg.SetString(ui.ID_QUERY, "")
+dlg.search()
+pump(searched, 10)
+row = click_category("Wood")
+check(row is not None and row[2] > 300, "merged 'Wood' category: %s" % (row,))
+pump(lambda: searched() and len(dlg.results) == row[2], 10)
+check(len(dlg.results) == row[2] and len({a.source for a in dlg.results}) == 4,
+      "Wood shows %d materials from all four sites" % len(dlg.results))
+row = click_category("Poly Haven")
+pump(lambda: searched() and {a.source for a in dlg.results} == {"polyhaven"}, 10)
+check({a.source for a in dlg.results} == {"polyhaven"} and len(dlg.results) == row[2], "site row filters to one site")
+dlg.category_changed(sources.ALL)
+
+# ---- each site ------------------------------------------------------------------------------
+CATEGORY = {"ambientcg": "Marble", "polyhaven": "Wood", "sharetextures": "Wood", "freepbr": "Wood"}
 downloaded = []
-for sid in sources.ORDER:
+for sid in sources.ONLINE:
     print("\n%s:" % sid)
     switch(sid)
     check(pump(lambda: len(dlg.cats.rows) > 5, 60), "categories loaded (%d)" % (len(dlg.cats.rows) - 1))
-    check(pump(lambda: len(dlg.grid.items) > 0, 90), "unfiltered search: %d results" % dlg.total)
+    check(pump(searched, 90), "unfiltered: %d results" % len(dlg.results))
     row = click_category(CATEGORY[sid])
     check(row is not None, "category '%s' is in the sidebar" % CATEGORY[sid])
     if row is None:
         continue
-    pump(lambda: len(dlg.grid.items) > 0 and dlg.total <= (row[2] or 10 ** 6), 60)
-    in_cat = all(any(CATEGORY[sid].lower() in c.lower() for c in a.categories) for a in dlg.grid.items)
-    check(dlg.total == row[2] or (sid != "ambientcg" and dlg.total <= row[2]),
-          "filtered to %s: %d results (sidebar said %s)" % (row[1], dlg.total, row[2]))
+    pump(lambda: searched() and len(dlg.results) == row[2], 30)
+    in_cat = all(any(CATEGORY[sid].lower() in c.lower() for c in a.categories) for a in dlg.results)
+    check(len(dlg.results) == row[2], "filtered to %s: %d results (sidebar said %s)" % (row[1], len(dlg.results), row[2]))
     check(in_cat, "every result is in that category")
-    pump(lambda: sum(1 for a in dlg.grid.items if a.key in ui._bitmaps) >= min(6, len(dlg.grid.items)), 40)
-    check(sum(1 for a in dlg.grid.items if a.key in ui._bitmaps) >= min(6, len(dlg.grid.items)),
-          "thumbnails load in a C4D-readable format")
+    pump(lambda: thumbs_shown(), 40)
+    check(thumbs_shown(), "thumbnails load in a C4D-readable format")
     before = len(maxon.GRAPHS)
-    target = 0
-    click(target)
-    click(target, double=True)
-    asset = dlg.grid.items[target]
+    click(0)
+    click(0, double=True)
+    asset = dlg.grid.items[0]
     pump(lambda: len(maxon.GRAPHS) > before or dlg.state.get(asset.key) == "error", 300)
     check(len(maxon.GRAPHS) > before, "double-click downloaded '%s' and built it" % asset.name)
     if len(maxon.GRAPHS) > before:
         check_material(maxon.GRAPHS[-1], c4d.documents.DOC.materials[-1])
         downloaded.append(asset)
-    dlg.cats.selected = sources.ALL
     dlg.category_changed(sources.ALL)
 
 print("\nPoly Haven thumbnail repair:")
 switch("polyhaven")
 dlg.SetString(ui.ID_QUERY, ph_first.name)
-dlg.search(0)
+dlg.search()
 pump(lambda: any(a.id == ph_first.id and a.key in ui._bitmaps for a in dlg.grid.items), 40)
 check(libmod.image_kind(webp) == "png", "the WebP thumbnail was replaced by a PNG")
 check(any(a.id == ph_first.id and a.key in ui._bitmaps for a in dlg.grid.items), "and it shows")
 dlg.SetString(ui.ID_QUERY, "")
 
+print("\nthumbnail memory:")
+cap, ui.MAX_BITMAPS = ui.MAX_BITMAPS, 5
+forgot = []
+real_forget, dlg.jobs.forget_thumb = dlg.jobs.forget_thumb, forgot.append
+ui._remember("x:1", ui._bitmaps[next(iter(ui._bitmaps))], dlg.jobs)
+check(len(ui._bitmaps) == 5 and len(forgot) > 0, "past the cap the oldest go, to reload if seen again (%d dropped)" % len(forgot))
+ui.MAX_BITMAPS, dlg.jobs.forget_thumb = cap, real_forget
+ui._bitmaps.pop("x:1", None)
+
 # ---- Installed ---------------------------------------------------------------------------
 print("\nInstalled tab:")
 manual = os.path.join(LIB, "Studio scans", "Oak_Wall_4K")
 os.makedirs(manual)
+first_entry = libmod.Library(LIB).scan()[0]
 for role, fn in (("color", "oak_wall_albedo.jpg"), ("normal_gl", "oak_wall_normal.jpg"), ("roughness", "oak_wall_rough.jpg")):
-    shutil.copy(libmod.Library(LIB).scan()[0]["maps"].get(role) or libmod.Library(LIB).scan()[0]["maps"]["color"],
-                os.path.join(manual, fn))
+    src = first_entry["maps"].get(role) or first_entry["maps"]["color"]
+    shutil.copy(src, os.path.join(manual, fn))
 switch("installed")
 check(pump(lambda: dlg.scanned and len(dlg.grid.items) >= len(downloaded) + 1, 30),
       "lists %d materials (%d downloaded + 1 hand-made folder)" % (len(dlg.grid.items), len(downloaded)))
 labels = [r[1] for r in dlg.cats.rows]
-check(all(s in labels for s in ("ambientCG", "Poly Haven", "FreePBR", "Local")), "sidebar groups by source: %s" % labels[:6])
-local_row = click_category("Local")
+check(all(s in labels for s in ("ambientCG", "Poly Haven", "ShareTextures", "FreePBR", "Local")),
+      "sidebar groups by source: %s" % labels[:7])
+click_category("Local")
 pump(lambda: len(dlg.grid.items) == 1, 10)
 check(len(dlg.grid.items) == 1 and "Oak Wall" in dlg.grid.items[0].name, "Local category shows the hand-made folder")
 pump(lambda: dlg.grid.items and dlg.grid.items[0].key in ui._bitmaps, 10)
@@ -193,7 +307,8 @@ net.download, net.get_bytes = real_download, real_get
 # ---- shared library: two PCs, one download ------------------------------------------------
 print("\nshared library:")
 lib = libmod.Library(LIB)
-fresh = sources.SOURCES["ambientcg"].search("", "Popular", 3, 2)[0][-1]
+fresh_ones = [a for a in sources.SOURCES["ambientcg"].search("", "Popular")[:40] if not lib.find(a, "1K")]
+fresh, stale = fresh_ones[0], fresh_ones[1]
 calls = []
 orig = sources.AmbientCG.download
 
@@ -216,7 +331,6 @@ check(len(waits) == 1, "the other one waited for it")
 check(len(results) == 2 and results["pcA"][0] == results["pcB"][0], "both got the same library folder")
 check(os.listdir(os.path.join(LIB, "_incoming")) == [], "no locks or half-made folders left in _incoming")
 
-stale = sources.SOURCES["ambientcg"].search("", "Popular", 4, 2)[0][-1]
 lockp = lib._lock_path(stale, "1K")
 with open(lockp, "w") as f:
     f.write("CRASHED-PC\n")
@@ -231,10 +345,18 @@ check(libmod.unc_path("Y:\\") is not None or os.name != "nt" or not os.path.isdi
 other = tempfile.mkdtemp(prefix="baspbr_lib2_")
 dlg.set_library(other, ask_unc=False)
 pump(lambda: dlg.scanned, 20)
-check(dlg.local == set() and dlg.GetString(ui.ID_LIB_INFO).startswith("0 material"), "switching to an empty folder rescans: '%s'" % dlg.GetString(ui.ID_LIB_INFO))
+check(dlg.local == set() and dlg.GetString(ui.ID_LIB_INFO).startswith("0 material"),
+      "switching to an empty folder rescans: '%s'" % dlg.GetString(ui.ID_LIB_INFO))
 dlg.set_library(LIB, ask_unc=False)
 pump(lambda: dlg.scanned and dlg.local, 20)
 check(len(dlg.local) >= len(downloaded), "and back: %s" % dlg.GetString(ui.ID_LIB_INFO))
+
+print("\nsettings:")
+dlg.set_tile_size(176)
+dlg.AskClose()
+with open(os.path.join(c4d.storage.PREFS, "baspbr_browser.json")) as f:
+    saved = json.load(f)
+check(saved.get("tile") == 176 and saved.get("source") == "installed", "tile size and tab are remembered")
 
 print("\nRedshift id check (fake node space):")
 check(ui.rsmat.check_ids(), "all ids resolve")

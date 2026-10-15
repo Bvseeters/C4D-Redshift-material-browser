@@ -4,7 +4,7 @@ import os
 
 DEFAULTS = {
     "library": os.path.join(os.path.expanduser("~"), "Documents", "Redshift Material Library"),
-    "source": "ambientcg",
+    "source": "everything",
     "query": "",
     "sort": {},                 # per source
     "resolution": "4K",
@@ -12,6 +12,9 @@ DEFAULTS = {
     "displacement": False,
     "displacement_scale": 1.0,
     "bump_from_height": True,
+    "category": {},             # per tab
+    "tile": 128,                # thumbnail size in pixels (Ctrl + mouse wheel)
+    "github_token": "",         # only while the GitHub repository is private
 }
 
 

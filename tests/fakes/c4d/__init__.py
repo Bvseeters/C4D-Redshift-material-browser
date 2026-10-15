@@ -21,8 +21,18 @@ class Vector(object):
 
 
 class BaseContainer(dict):
+    def __init__(self, id=0):
+        dict.__init__(self)
+        self.id = id
+
+    def GetId(self):
+        return self.id
+
     def SetString(self, k, v):
         self[k] = v
+
+    def GetInt32(self, k, default=0):
+        return self.get(k, default)
 
     SetBool = SetInt32 = SetString
 
