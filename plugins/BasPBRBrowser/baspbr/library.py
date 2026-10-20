@@ -8,8 +8,11 @@ Every downloaded material lives in its own folder:
 
 Maps are renamed to one naming scheme whatever the source called them, so the
 Redshift builder only ever deals with roles. A material that's already in the
-library is reused instead of downloaded again.
+library is reused instead of downloaded again. When a material graph said more
+than file names can (AMD's MaterialX: channels, constants, tiling), asset.json
+keeps that too, under "graph".
 """
+import collections
 import json
 import os
 import re
@@ -85,6 +88,56 @@ def pick_maps(paths):
         if role and role not in maps:
             maps[role] = p
     return maps
+
+
+# one channel of a texture: index 0..3 = R, G, B, A; value = min + (max - min) * sample
+Channel = collections.namedtuple("Channel", "index min max")
+
+
+class MapSet(dict):
+    """{role: path}, plus what a material graph says that file names can't: which
+    channel of a file a value sits in and how it's remapped, constants instead of
+    textures, and the authored tiling. Sources without a graph leave these empty,
+    and a plain {role: path} dict works wherever a MapSet does."""
+
+    def __init__(self, maps=(), graph=None):
+        dict.__init__(self, maps)
+        self.channels = {}           # role -> Channel
+        self.base_color = None       # [r, g, b] linear, when the colour is a constant
+        self.roughness = None        # constants, when there's no texture
+        self.metalness = None
+        self.tiling = 1.0
+        if graph:
+            try:
+                self.channels = {r: Channel(int(c[0]), float(c[1]), float(c[2]))
+                                 for r, c in (graph.get("channels") or {}).items()}
+                if graph.get("base_color"):
+                    self.base_color = [float(v) for v in graph["base_color"]][:3]
+                for k in ("roughness", "metalness"):
+                    if graph.get(k) is not None:
+                        setattr(self, k, float(graph[k]))
+                self.tiling = float(graph.get("tiling") or 1.0)
+            except (TypeError, ValueError, IndexError, AttributeError):
+                pass                 # a damaged asset.json: just the files
+
+    def graph(self):
+        """What to keep in asset.json; {} when there's nothing beyond the files."""
+        g = {}
+        if self.channels:
+            g["channels"] = {r: list(c) for r, c in self.channels.items()}
+        if self.base_color is not None:
+            g["base_color"] = list(self.base_color)
+        for k in ("roughness", "metalness"):
+            if getattr(self, k) is not None:
+                g[k] = getattr(self, k)
+        if self.tiling != 1.0:
+            g["tiling"] = self.tiling
+        return g
+
+
+# Sources whose downloads carry a material graph. Their folders made by a version
+# that guessed the maps from file names (no "graph" in asset.json) are fetched again.
+GRAPH_SOURCES = ("amd",)
 
 
 def safe_name(name):
@@ -194,9 +247,10 @@ class Library(object):
         info = _read_json(os.path.join(d, "asset.json"))
         if info is None:
             return None
-        maps = {r: os.path.join(d, fn) for r, fn in info.get("maps", {}).items()
-                if os.path.isfile(os.path.join(d, fn))}
-        return (d, maps) if maps else None
+        if asset.source in GRAPH_SOURCES and "graph" not in info:
+            return None                  # its maps were guessed from file names: fetch it again
+        maps = _maps_of(d, info)
+        return (d, maps) if len(maps) or maps.graph() else None
 
     def scan(self):
         """Every material in the library, as dicts — the plugin's own downloads
@@ -283,17 +337,27 @@ class Library(object):
     def store(self, asset, res, files, licence, staging, extra=None):
         """Assemble the asset folder in staging, then rename it into place in one go.
 
-        files: {role: path}; extra may carry "preview" (a thumbnail file to keep with
-        the material). Returns (folder, {role: path}).
+        files: {role: path} or a MapSet (several roles may share one file, e.g.
+        roughness and metalness in two channels of a mask); extra may carry
+        "preview" (a thumbnail file to keep with the material).
+        Returns (folder, MapSet).
         """
         final = os.path.join(staging, "asset")
         os.makedirs(final, exist_ok=True)
         base = "%s_%s" % (safe_name(asset.name), res.upper())
-        names = {}
+        names, moved = {}, {}
         for role, src in files.items():
-            fn = "%s_%s%s" % (base, SUFFIX[role], os.path.splitext(src)[1].lower())
-            shutil.move(src, os.path.join(final, fn))
-            names[role] = fn
+            if src not in moved:
+                shared = sum(1 for s in files.values() if s == src) > 1
+                suffix = SUFFIX[role] if not shared else ("ORM" if classify(src) == "orm" else "Mask")
+                fn = "%s_%s%s" % (base, suffix, os.path.splitext(src)[1].lower())
+                n = 2
+                while fn in moved.values():
+                    fn = "%s_%s%d%s" % (base, suffix, n, os.path.splitext(src)[1].lower())
+                    n += 1
+                shutil.move(src, os.path.join(final, fn))
+                moved[src] = fn
+            names[role] = moved[src]
         extra = dict(extra or {})
         preview = extra.pop("preview", None)
         kind = image_kind(preview) if preview else None
@@ -305,6 +369,9 @@ class Library(object):
                 "categories": list(getattr(asset, "categories", []) or []), "tags": list(asset.tags or []),
                 "thumb_url": asset.thumb_url, "downloaded": time.strftime("%Y-%m-%d %H:%M"),
                 "downloaded_by": _host()}
+        graph = files.graph() if isinstance(files, MapSet) else None
+        if graph is not None:
+            info["graph"] = graph
         info.update(extra)
         with open(os.path.join(final, "asset.json"), "w", encoding="utf-8") as f:
             json.dump(info, f, indent=1)
@@ -318,7 +385,7 @@ class Library(object):
             shutil.rmtree(dest, ignore_errors=True)   # an incomplete leftover
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         os.rename(final, dest)
-        return dest, {r: os.path.join(dest, fn) for r, fn in names.items()}
+        return dest, MapSet({r: os.path.join(dest, fn) for r, fn in names.items()}, graph)
 
 
 # ---- helpers -------------------------------------------------------------------------------
@@ -338,9 +405,14 @@ def _read_json(path):
         return None
 
 
+def _maps_of(folder, info):
+    """The MapSet an asset.json describes (files that are really there, plus its graph)."""
+    return MapSet({r: os.path.join(folder, fn) for r, fn in (info.get("maps") or {}).items()
+                   if os.path.isfile(os.path.join(folder, fn))}, info.get("graph"))
+
+
 def _entry_from_info(folder, rel, info):
-    maps = {r: os.path.join(folder, fn) for r, fn in (info.get("maps") or {}).items()
-            if os.path.isfile(os.path.join(folder, fn))}
+    maps = _maps_of(folder, info)
     preview = info.get("preview")
     return {"folder": folder, "rel": rel, "managed": True, "source": info.get("source", "local"),
             "id": info.get("id", rel), "name": info.get("name") or os.path.basename(folder),

@@ -17,6 +17,8 @@ NODES = {
     CORE + "bumpmap": (["input", "inputtype", "scale", "flipy"], ["out"]),
     CORE + "displacement": (["texmap", "scale"], ["out"]),
     CORE + "rscolorsplitter": (["input"], ["outr", "outg", "outb", "outa"]),
+    # Math Float "Change Range": ids from Maxon's Cinema 4D node reference
+    CORE + "rsmathrange": (["input", "old_min", "old_max", "new_min", "new_max", "clamp"], ["out"]),
 }
 
 
@@ -35,6 +37,16 @@ class String(str):
 
 class Int32(int):
     pass
+
+
+class Color(tuple):
+    def __new__(cls, r=0.0, g=0.0, b=0.0):
+        return tuple.__new__(cls, (r, g, b))
+
+
+class Vector2d(tuple):
+    def __new__(cls, x=0.0, y=0.0):
+        return tuple.__new__(cls, (x, y))
 
 
 class DataDictionary(dict):

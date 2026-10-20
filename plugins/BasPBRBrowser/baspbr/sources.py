@@ -19,7 +19,10 @@ without paging, and what lets "Everything" search all sites at once.
                 item/<slug> for its ZIP links (1K/2K/4K). Its images are WebP
                 only, so thumbnails come through the site's own image resizer,
                 which hands out JPEG to clients that don't take WebP. CC0.
-  Everything    all of the above in one list; categories merged by name.
+  AMD GPUOpen   api.matlib.gpuopen.com; one ZIP per size and bit depth, a .mtlx
+                plus textures. The .mtlx (not the file names) says which file,
+                and which channel of it, is what (see mtlx.py).
+  Everything   all of the above in one list; categories merged by name.
   Installed     what's in the library folder (maybe a share other PCs fill too).
 """
 import html
@@ -33,8 +36,8 @@ import urllib.parse
 import zipfile
 from datetime import datetime
 
-from . import net
-from .library import classify, image_kind, local_cache_dir, pick_maps
+from . import mtlx, net
+from .library import IMAGE_EXT, MapSet, classify, image_kind, local_cache_dir, pick_maps
 
 RESOLUTIONS = ("1K", "2K", "4K", "8K", "12K", "16K")     # every size any site offers
 HIGHEST = "Highest"           # the largest size each material comes in
@@ -578,8 +581,8 @@ class ShareTextures(Source):
 # =====================================================================================
 class AMDMatLib(Source):
     """AMD's MaterialX Library (matlib.gpuopen.com). Each material comes in packages
-    of 1K/2K/4K at 8 or 16 bit: a .mtlx plus textures, with ambient occlusion,
-    roughness and metalness packed into one ORM map."""
+    of 1K-8K at 8 or 16 bit: a .mtlx plus textures. Roughness and metalness are
+    often a channel of a packed map (remapped), or a constant in the .mtlx."""
     id = "amd"
     label = "AMD GPUOpen"
     licence = "Free, commercial use allowed (AMD MaterialX Library)"
@@ -647,7 +650,7 @@ class AMDMatLib(Source):
         total = float(size.group(1)) * 1e6 if size else 50e6
         zpath = os.path.join(work, "download.zip")
         net.download(info["file_url"], zpath, lambda d, t: progress(d / float(t or total)), cancel)
-        return _extract_maps(zpath, work)
+        return _extract_with_graph(zpath, work)
 
 
 # =====================================================================================
@@ -838,7 +841,61 @@ def _extract_maps(zpath, work):
     return maps
 
 
-SOURCES = {s.id: s for s in (Everything(), AmbientCG(), PolyHaven(), FreePBR(), ShareTextures(), AMDMatLib(),
+def _extract_with_graph(zpath, work):
+    """A zip that carries a MaterialX graph (AMD): the graph says which file - and
+    which channel of it - is what, and gives the constants and the tiling. Maps it
+    says nothing about (height, AO) are added by name. Returns a MapSet; without a
+    usable graph its maps are sorted by name only."""
+    out_dir = os.path.join(work, "maps")
+    os.makedirs(out_dir, exist_ok=True)
+    images, graph_file = {}, None
+    with zipfile.ZipFile(zpath) as z:
+        for info in z.infolist():
+            name = os.path.basename(info.filename)
+            ext = os.path.splitext(name)[1].lower()
+            if info.is_dir() or not name or (ext not in IMAGE_EXT and ext != ".mtlx"):
+                continue
+            dst = os.path.join(out_dir, name)
+            with z.open(info) as src, open(dst, "wb") as f:
+                shutil.copyfileobj(src, f)
+            if ext != ".mtlx":
+                images[name] = dst
+            elif graph_file is None:
+                graph_file = dst
+    by_name = pick_maps(images.values())
+    maps = None
+    if graph_file:
+        try:
+            maps = mtlx.read(graph_file, images)
+        except Exception as exc:
+            print("[BasPBR Browser] couldn't read %s (%s) - sorting its maps by name" % (os.path.basename(graph_file), exc))
+    if maps is None:
+        if not by_name:
+            raise RuntimeError("no recognisable texture maps in the download")
+        return MapSet(by_name)
+    # what the graph says nothing about, by name - never a file the graph already uses
+    covered = set(maps)
+    if maps.base_color is not None:
+        covered.add("color")
+    for role in ("roughness", "metalness"):
+        if getattr(maps, role) is not None:
+            covered.add(role)
+    if "roughness" in covered:
+        covered.add("gloss")
+    if "normal_gl" in covered:
+        covered.add("normal_dx")
+    if {"roughness", "metalness"} <= covered:
+        covered.add("orm")
+    used = set(maps.values())
+    for role, path in by_name.items():
+        if role not in covered and path not in used:
+            maps[role] = path
+    if not maps and not maps.graph():
+        raise RuntimeError("no recognisable texture maps in the download")
+    return maps
+
+
+SOURCES ={s.id: s for s in (Everything(), AmbientCG(), PolyHaven(), FreePBR(), ShareTextures(), AMDMatLib(),
                               Installed())}
 ONLINE = ("ambientcg", "polyhaven", "sharetextures", "amd", "freepbr")
 TABS = ("everything",) + ONLINE + ("installed",)

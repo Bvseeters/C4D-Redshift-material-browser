@@ -20,6 +20,10 @@ bitmap loader refuses WebP, like Cinema 4D). Live network. Checks:
     C4D reads (including repairing a WebP thumbnail an old version cached), a
     double-clicked material downloads and becomes a correctly wired Redshift
     material assigned to the selection
+  * AMD: the .mtlx decides, not the file names - roughness from the channel it names
+    (Color Splitter -> Change Range for its remap), constant metalness / colour as
+    port values, the authored tiling on every Texture's Scale, kept in asset.json;
+    an AMD folder an older version made without the graph is downloaded again
   * Installed tab: lists the library (plugin downloads + a hand-made folder),
     categories by source, double-click builds WITHOUT any network access
   * shared library: two "PCs" fetching the same new material download it once
@@ -169,6 +173,7 @@ def searched():
 
 def check_material(graph, mat):
     ends = {(c.split("<")[0], d) for a, b, c, d in graph.wires}
+    ends |= {(l.split("<")[0], p) for l, p, v in graph.values}      # or a constant (AMD's graphs)
     check(("output", "surface") in ends and ("standardmaterial", "base_color") in ends and
           ("standardmaterial", "refl_roughness") in ends and ("standardmaterial", "bump_input") in ends,
           "graph wired: colour, roughness, normal -> bump, surface")
@@ -329,7 +334,7 @@ def fake_download(self, asset, res, work, progress, cancel):
     path = os.path.join(work, "fake_basecolor.jpg")
     with open(path, "wb") as f:
         f.write(b"\xff\xd8\xff\xe0" + b"0" * 64)
-    return {"color": path}
+    return libmod.MapSet({"color": path})          # AMD downloads always carry their graph
 
 
 sources.AMDMatLib.available = lambda self, asset: ["1K", "2K"]
@@ -420,16 +425,117 @@ for sid in sources.ONLINE:
         downloaded.append(asset)
         name = c4d.documents.DOC.materials[-1].name
         check(name.endswith(" 2K" if sid == "freepbr" else " 1K"), "named after the size it has: '%s'" % name)
-        if sid == "amd":            # some AMD materials pack AO / roughness / metalness into one map
-            palm = next(a for a in sources.SOURCES["amd"].catalogue() if a.name == "Indigo Palm Wallpaper")
-            maps = sources.fetch(libmod.Library(LIB), palm, "1K")[1]
-            check("orm" in maps and "roughness" not in maps, "AMD's packed ORM map is kept: %s" % sorted(maps))
-            ui.rsmat.build(c4d.documents.DOC, palm.name, maps)
-            w = maxon.GRAPHS[-1].wires
-            check(any(a.startswith("rscolorsplitter") and b == "outg" and d == "refl_roughness" for a, b, c, d in w) and
-                  any(a.startswith("rscolorsplitter") and b == "outb" and d == "metalness" for a, b, c, d in w),
-                  "packed ORM map: green -> roughness, blue -> metalness through a Color Splitter")
     dlg.category_changed(sources.ALL)
+
+# ---- AMD: the MaterialX graph decides, not the file names ------------------------------------
+print("\nAMD MaterialX graphs:")
+
+
+def feeding(g, label, port):
+    """What feeds label.port, walking back through Change Range and Color Splitter
+    nodes to the texture: [(node, its output port), ...]."""
+    chain = []
+    while True:
+        src = next(((a, b) for a, b, c, d in g.wires if c == label and d == port), None)
+        if src is None:
+            return chain
+        chain.append(src)
+        if not src[0].startswith(("rsmathrange", "rscolorsplitter")):
+            return chain
+        label, port = src[0], "input"
+
+
+def values(g, label):
+    return {p: v for l, p, v in g.values if l == label}
+
+
+def near(a, b):
+    return a is not None and abs(a - b) < 1e-3
+
+
+# name: roughness (splitter output, remap or None for 0..1), metalness (a constant, or a
+# splitter output of the same file as roughness), tiling, constant base colour (or None)
+AMD_CASES = [
+    ("Grey Chateau Solid Granite", ("outr", (0.0, 0.915)), 0.0, 2.0, None),        # R of _Mask.png
+    ("Sandstone", ("outg", None), 0.0, 2.0, None),                                    # G of _mask.png
+    ("Aluminum Brushed", ("outr", (0.0978, 0.6088)), 1.0, 10.0, None),                # base layer of 4
+    ("Gold Parametric Imperfections", ("outr", None), 1.0, 1.0, (1.0, 0.7605, 0.3278)),  # no colour map
+    ("Copper Brushed", ("outr", None), 1.0, 2.0, None),
+    ("Indigo Palm Wallpaper", ("outg", (0.25, 1.0)), "outb", 2.0, None),             # ORM: G and B
+]
+lib = libmod.Library(LIB)
+amd_by_name = {a.name: a for a in sources.SOURCES["amd"].catalogue()}
+for name, (rport, rrange), metal, tiling, colour in AMD_CASES:
+    asset = amd_by_name.get(name)
+    check(asset is not None, "%s is in AMD's catalogue" % name)
+    if asset is None:
+        continue
+    folder, maps, reused = sources.fetch(lib, asset, "1K")
+    mat, problems = ui.rsmat.build(c4d.documents.DOC, name, maps)
+    g = maxon.GRAPHS[-1]
+    std = next(n.label() for n in g.nodes if n.type.endswith("standardmaterial"))
+    sv = values(g, std)
+    print("  %s:" % name)
+
+    rough = feeding(g, std, "refl_roughness")
+    kinds = [l.split("<")[0] for l, p in rough]
+    want = (["rsmathrange"] if rrange else []) + ["rscolorsplitter", "texturesampler"]
+    split_port = next((p for l, p in rough if l.startswith("rscolorsplitter")), None)
+    check(kinds == want and split_port == rport, "  roughness: %s" % " <- ".join("%s.%s" % (l, p) for l, p in rough))
+    if rrange:
+        rv = values(g, rough[0][0])
+        check(near(rv.get("old_min"), 0) and near(rv.get("old_max"), 1) and near(rv.get("new_min"), rrange[0])
+              and near(rv.get("new_max"), rrange[1]), "  remapped 0..1 -> %.3f..%.3f: %s" % (rrange + (rv,)))
+
+    if isinstance(metal, str):
+        m = feeding(g, std, "metalness")
+        check([p for l, p in m] == [metal, "outcolor"] and m[0][0] == rough[-2][0],
+              "  metalness: %s, the same file and Color Splitter as roughness"
+              % " <- ".join("%s.%s" % (l, p) for l, p in m))
+        texs = [n for n in g.nodes if n.type.endswith("texturesampler")]
+        check(len(texs) == len({values(g, n.label()).get("path") for n in texs}), "  one Texture node per file")
+    else:
+        check(near(sv.get("metalness"), metal) and not feeding(g, std, "metalness"),
+              "  metalness: the constant %s" % sv.get("metalness"))
+
+    if colour:
+        bc = sv.get("base_color")
+        check(not feeding(g, std, "base_color") and bc is not None and all(near(a, b) for a, b in zip(bc, colour)),
+              "  base colour: the constant %s (linear), no texture" % (bc,))
+    else:
+        check([l.split("<")[0] for l, p in feeding(g, std, "base_color")] == ["texturesampler"],
+              "  base colour: a texture")
+
+    scales = [values(g, n.label()).get("scale") for n in g.nodes if n.type.endswith("texturesampler")]
+    if tiling == 1.0:
+        check(scales and all(s is None for s in scales), "  tiling 1: no Scale set")
+    else:
+        check(scales and all(s == maxon.Vector2d(tiling, tiling) for s in scales),
+              "  tiling %gx on all %d Texture nodes" % (tiling, len(scales)))
+    check(not problems, "  no Redshift ports skipped %s" % (problems or ""))
+    with open(os.path.join(folder, "asset.json")) as f:
+        stored = json.load(f).get("graph")
+    check(stored == maps.graph() and stored, "  asset.json keeps the graph: %s" % stored)
+    if name == "Indigo Palm Wallpaper":
+        check(maps["roughness"] == maps["metalness"] and maps["roughness"].endswith("_ORM.png") and "height" in maps,
+              "  the shared ORM file is stored once; height added by name: %s"
+              % sorted("%s=%s" % (r, os.path.basename(p)) for r, p in maps.items()))
+
+granite = amd_by_name["Grey Chateau Solid Granite"]
+folder, maps, reused = sources.fetch(lib, granite, "1K")
+ch = maps.channels.get("roughness")
+check(reused and ch is not None and ch.index == 0 and near(ch.max, 0.915) and maps.metalness == 0.0 and maps.tiling == 2.0,
+      "fetched again: from the library, graph and all (%s)" % (ch,))
+sand = amd_by_name["Sandstone"]
+info_path = os.path.join(lib.asset_dir(sand, "1K"), "asset.json")
+with open(info_path) as f:
+    info = json.load(f)
+info.pop("graph")                            # as 3.2 wrote it: maps guessed from names
+with open(info_path, "w") as f:
+    json.dump(info, f)
+folder, maps, reused = sources.fetch(lib, sand, "1K")
+check(not reused and maps.channels.get("roughness") and maps.channels["roughness"].index == 1,
+      "an AMD material an older version downloaded (no graph) is downloaded again")
 
 print("\nPoly Haven thumbnail repair:")
 switch("polyhaven")

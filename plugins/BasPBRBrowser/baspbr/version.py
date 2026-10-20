@@ -4,13 +4,20 @@ To release an update: raise VERSION, add a line or two under NOTES, commit and
 push to BRANCH. Every PC with the plugin offers it the next time someone opens
 the browser after starting Cinema 4D.
 """
-VERSION = "3.2.0"
+VERSION = "3.3.0"
 
 REPO = "Bvseeters/C4D-Redshift-material-browser"
 BRANCH = "main"
 PLUGIN_DIR = "plugins/BasPBRBrowser"        # the plugin's folder inside the repository
 
 NOTES = {
+    "3.3.0": [
+        "AMD GPUOpen materials follow their MaterialX file instead of guessing from file names: "
+        "roughness comes from the right channel of the mask map, remapped as AMD set it",
+        "AMD metals get their metalness, and materials without a colour map get their colour",
+        "AMD materials keep their authored tiling (the Texture nodes' Scale)",
+        "AMD materials downloaded by an older version are downloaded again the next time you use them",
+    ],
     "3.2.0": [
         "Resolution menu shows only the sizes a site really has; Highest (the default) gets each material's largest",
         "Materials download at - and are named after - the size they really come in (no more '8K' labels on 4K maps)",
