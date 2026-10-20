@@ -4,13 +4,21 @@ To release an update: raise VERSION, add a line or two under NOTES, commit and
 push to BRANCH. Every PC with the plugin offers it the next time someone opens
 the browser after starting Cinema 4D.
 """
-VERSION = "3.3.0"
+VERSION = "3.4.0"
 
 REPO = "Bvseeters/C4D-Redshift-material-browser"
 BRANCH = "main"
 PLUGIN_DIR = "plugins/BasPBRBrowser"        # the plugin's folder inside the repository
 
 NOTES = {
+    "3.4.0": [
+        "Sketchfab tab: search Sketchfab's downloadable models, with licence badges (CC0 / CREDIT / NON-COMM) and face counts",
+        "Paste link: copy a model's address in your browser, press Paste link - it's downloaded and imported",
+        "Models come in as objects with Redshift materials (colour, roughness, metalness, normal, emission, opacity)",
+        "Sketchfab models have their own folder (Library row on the Sketchfab tab), separate from the materials",
+        "Each model keeps ATTRIBUTION.txt with its author and licence; non-commercial models ask first",
+        "Your Sketchfab API token: Help > Sketchfab API token (asked for the first time you import)",
+    ],
     "3.3.0": [
         "AMD GPUOpen materials follow their MaterialX file instead of guessing from file names: "
         "roughness comes from the right channel of the mask map, remapped as AMD set it",

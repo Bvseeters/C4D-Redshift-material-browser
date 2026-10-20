@@ -11,6 +11,9 @@ timer drains it on the main thread (where creating materials is allowed):
     ("thumb",      key, path)                      thumbnail on disk, ready to draw
     ("thumb_make", key, color_map_path)            no thumbnail anywhere: draw one from the colour map
     ("details",    key, [sizes], error)            the sizes a material really comes in
+    ("more",       token, assets, error)           the next page of a search that pages (Sketchfab)
+    ("model",      key, folder, info, scene, images, reused, asset, payload)
+                                                   a model on disk and read, ready to build
     ("progress",   key, fraction)                  download progress 0..1
     ("waiting",    key, holder)                    another PC is downloading this material
     ("done",       key, folder, maps, reused, asset, payload)
@@ -24,11 +27,13 @@ import traceback
 
 from . import net, sources
 from .library import image_kind, local_cache_dir
+from .library import _read_json as libmod_read, scan_all
 
 
 class Jobs(object):
-    def __init__(self, library, thumb_threads=4):
+    def __init__(self, library, thumb_threads=4, model_library=None):
         self.library = library
+        self.model_library = model_library or library    # where Sketchfab models go
         self.results = queue.Queue()
         self._thumbs = queue.LifoQueue()        # newest first: what's in view right now
         self._downloads = queue.Queue()
@@ -45,9 +50,12 @@ class Jobs(object):
         threading.Thread(target=fn, daemon=True).start()
 
     # ---- searches, categories, the library ---------------------------------------------
-    def search(self, token, source_id, query, sort, category=sources.ALL, sites=None):
-        """sites: for Everything, the sites that are ticked (None = all)."""
-        kw = {"sites": sites} if sites is not None else {}
+    def search(self, token, source_id, query, sort, category=sources.ALL, sites=None, **extra):
+        """sites: for Everything, the sites that are ticked (None = all); extra: a
+        source's own options (Sketchfab: max_faces, commercial, staffpicked)."""
+        kw = dict(extra)
+        if sites is not None:
+            kw["sites"] = sites
 
         def run():
             try:
@@ -56,6 +64,28 @@ class Jobs(object):
             except Exception as exc:
                 traceback.print_exc()
                 self.results.put(("search", token, [], message(exc)))
+        self._run(run)
+
+    def more(self, token, source_id, url, **extra):
+        """The next page of a search that pages."""
+        def run():
+            try:
+                self.results.put(("more", token, sources.SOURCES[source_id].page(url, **extra), None))
+            except Exception as exc:
+                self.results.put(("more", token, [], message(exc)))
+        self._run(run)
+
+    def load_model(self, asset, payload=None):
+        """Read a model that's in the library (the Installed tab) for building."""
+        def run():
+            e = asset.extra["entry"]
+            try:
+                info = libmod_read(os.path.join(e["folder"], "asset.json"))
+                scene, images = sources.load_model(e["folder"], info)
+                self.results.put(("model", asset.key, e["folder"], info, scene, images, True, asset, payload))
+            except Exception as exc:
+                traceback.print_exc()
+                self.results.put(("error", asset.key, message(exc)))
         self._run(run)
 
     def categories(self, source_id, sites=None, key=None):
@@ -79,15 +109,16 @@ class Jobs(object):
         self._run(run)
 
     def scan(self):
-        """Re-read the library folder (it may have been filled from other PCs)."""
-        lib = self.library
+        """Re-read the library and models folders (they may have been filled from other PCs)."""
+        lib, models = self.library, self.model_library
 
         def run():
             try:
-                lib.writable()          # touches the share once, here rather than on C4D's thread
-                entries = lib.scan()
+                lib.writable()          # touches the shares once, here rather than on C4D's thread
+                models.writable()
+                entries = scan_all([lib, models])
                 inst = sources.SOURCES["installed"]
-                inst.library, inst._all = lib, entries
+                inst.library, inst.model_library, inst._all = lib, models, entries
                 self.results.put(("scanned", entries, None))
             except Exception as exc:
                 self.results.put(("scanned", [], message(exc)))
@@ -116,7 +147,7 @@ class Jobs(object):
             return self._installed_thumb(asset)
         if not asset.thumb_url:
             return None, None
-        path = self.library.thumb_path(asset)
+        path = (self.model_library if asset.source in sources.MODELS else self.library).thumb_path(asset)
         if os.path.isfile(path) and image_kind(path) in ("png", "jpg"):
             return path, None
         return None, (asset.thumb_url, path)      # missing, or a WebP C4D can't read
@@ -196,17 +227,22 @@ class Jobs(object):
             self._cancel.clear()
             self.busy_key = asset.key
             key = asset.key
+            progress = lambda f: self.results.put(("progress", key, max(0.0, min(1.0, f))))  # noqa: E731
+            waiting = lambda holder: self.results.put(("waiting", key, holder))                # noqa: E731
             try:
-                folder, maps, reused = sources.fetch(
-                    self.library, asset, res,
-                    lambda f: self.results.put(("progress", key, max(0.0, min(1.0, f)))),
-                    self._cancel,
-                    lambda holder: self.results.put(("waiting", key, holder)))
+                if asset.source in sources.MODELS:
+                    folder, info, reused = sources.fetch_model(self.model_library, asset, (payload or {}).get("token"),
+                                                               progress, self._cancel, waiting)
+                    scene, images = sources.load_model(folder, info)
+                    self.results.put(("model", key, folder, info, scene, images, reused, asset, payload))
+                    continue
+                folder, maps, reused = sources.fetch(self.library, asset, res, progress, self._cancel, waiting)
                 self.results.put(("done", key, folder, maps, reused, asset, payload))
             except net.Cancelled:
                 self.results.put(("error", key, "cancelled"))
             except Exception as exc:
-                traceback.print_exc()
+                if not isinstance(exc, sources.sketchfab.SketchfabError):   # those say it all themselves
+                    traceback.print_exc()
                 self.results.put(("error", key, message(exc)))
             finally:
                 self.busy_key = None

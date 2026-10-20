@@ -207,6 +207,39 @@ class Library(object):
     def asset_dir(self, asset, res):
         return os.path.join(self.root, asset.source_label, "%s_%s" % (safe_name(asset.name), res.upper()))
 
+    # ---- models (Sketchfab) -------------------------------------------------------
+    def model_dir(self, asset):
+        """<library>/<Source>/<Name>_<the uid's first 6>: models sharing a name stay apart."""
+        return self.asset_dir(asset, asset.id[:6])
+
+    def find_model(self, asset):
+        """(folder, info) when the model is in the library already, else None."""
+        d = self.model_dir(asset)
+        info = _read_json(os.path.join(d, "asset.json"))
+        if info and info.get("kind") == "model" and info.get("model") and \
+                os.path.isfile(os.path.join(d, info["model"])):
+            return d, info
+        return None
+
+    def store_model(self, asset, staged, info):
+        """Write asset.json into the assembled folder staged and rename it into place
+        in one go (as store() does for materials). Returns (folder, info)."""
+        info = dict(info, source=asset.source, id=asset.id, name=asset.name, kind="model",
+                    page=asset.page_url, thumb_url=asset.thumb_url,
+                    categories=list(asset.categories or []), tags=list(asset.tags or []),
+                    downloaded=time.strftime("%Y-%m-%d %H:%M"), downloaded_by=_host())
+        with open(os.path.join(staged, "asset.json"), "w", encoding="utf-8") as f:
+            json.dump(info, f, indent=1)
+        dest = self.model_dir(asset)
+        if os.path.isdir(dest):
+            found = self.find_model(asset)        # another PC finished first: use theirs
+            if found:
+                return found
+            shutil.rmtree(dest, ignore_errors=True)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.rename(staged, dest)
+        return dest, info
+
     def writable(self):
         if self._writable is None:
             try:
@@ -389,6 +422,21 @@ class Library(object):
 
 
 # ---- helpers -------------------------------------------------------------------------------
+def scan_all(libraries):
+    """Every entry of several libraries. A folder that is - or lies inside - one
+    already read isn't read again."""
+    def norm(lib):
+        return os.path.normcase(os.path.abspath(lib.root)).rstrip("\\/") + os.sep
+    read, out = [], []
+    for lib in sorted((l for l in libraries if l is not None), key=lambda l: len(norm(l))):
+        r = norm(lib)
+        if any(r.startswith(done) for done in read):
+            continue
+        read.append(r)
+        out.extend(lib.scan())
+    return out
+
+
 def _host():
     try:
         import socket
@@ -421,7 +469,11 @@ def _entry_from_info(folder, rel, info):
             "thumb": os.path.join(folder, preview) if preview and os.path.isfile(os.path.join(folder, preview)) else None,
             "thumb_url": info.get("thumb_url", ""), "page": info.get("page", ""),
             "licence": info.get("licence", ""), "downloaded": info.get("downloaded", ""),
-            "downloaded_by": info.get("downloaded_by", "")}
+            "downloaded_by": info.get("downloaded_by", ""),
+            "kind": info.get("kind", "material"),
+            "model": os.path.join(folder, info["model"]) if info.get("model") else None,
+            "images": {int(k): os.path.join(folder, v) for k, v in (info.get("images") or {}).items()},
+            "author": info.get("author", "")}
 
 
 def _entry_from_maps(folder, rel, maps, images):

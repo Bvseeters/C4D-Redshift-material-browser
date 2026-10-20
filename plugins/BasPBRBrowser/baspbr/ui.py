@@ -2,7 +2,10 @@
 
 Tabs: Everything (every site at once, or the ticked ones), ambientCG, Poly
 Haven, ShareTextures, AMD GPUOpen, FreePBR, and Installed (the library folder -
-possibly a share several PCs use). Under them: search, sort, resolution, the
+possibly a share several PCs use) - plus Sketchfab, for whole models: search
+there, or copy a model's link in the browser and press Paste link; it comes in
+as objects with Redshift materials, its licence credited in ATTRIBUTION.txt.
+Under the tabs: search, sort, resolution, the
 library folder and material options; on the left the categories (Up / Down step
 through them), on the right the thumbnails, which load as they scroll into view
 (Ctrl + mouse wheel or the Size slider resizes them).
@@ -26,18 +29,18 @@ from c4d import gui
 
 from . import library as libmod
 from . import jobs as jobsmod
-from . import rsmat, settings, sources, updater, version
+from . import c4dscene, rsmat, settings, sketchfab, sources, updater, version
 
 # gadget ids
 ID_TABS = 1000
-ID_QUERY, ID_SEARCH, ID_SORT, ID_RES = 1002, 1003, 1004, 1005
+ID_QUERY, ID_SEARCH, ID_SORT, ID_RES, ID_PASTE, ID_RES_LABEL = 1002, 1003, 1004, 1005, 1006, 1007
 ID_ASSIGN, ID_DISP, ID_DISP_SCALE, ID_BUMP_HEIGHT = 1010, 1011, 1012, 1013
 ID_SCROLL, ID_GRID, ID_CAT_SCROLL, ID_CATS = 1020, 1021, 1022, 1023
 ID_COUNT, ID_SIZE, ID_STATUS, ID_CANCEL, ID_CREATE = 1031, 1032, 1033, 1034, 1035
 ID_LICENCE = 1036
-ID_LIBRARY, ID_LIB_BROWSE, ID_LIB_OPEN, ID_LIB_RESCAN, ID_LIB_INFO = 1040, 1041, 1042, 1043, 1044
-ID_MENU_FOLDER, ID_MENU_OPEN, ID_MENU_CHECK, ID_MENU_REFRESH = 1100, 1101, 1102, 1103
-ID_MENU_UPDATE, ID_MENU_TOKEN, ID_MENU_ABOUT, ID_MENU_LOG = 1110, 1111, 1112, 1113
+ID_LIBRARY, ID_LIB_BROWSE, ID_LIB_OPEN, ID_LIB_RESCAN, ID_LIB_INFO, ID_LIB_LABEL = 1040, 1041, 1042, 1043, 1044, 1045
+ID_MENU_FOLDER, ID_MENU_OPEN, ID_MENU_CHECK, ID_MENU_REFRESH, ID_MENU_MODELS = 1100, 1101, 1102, 1103, 1104
+ID_MENU_UPDATE, ID_MENU_TOKEN, ID_MENU_ABOUT, ID_MENU_LOG, ID_MENU_SFTOKEN = 1110, 1111, 1112, 1113, 1114
 
 # popup menu ids (must be >= FIRST_POPUP_ID)
 POP_CREATE = c4d.FIRST_POPUP_ID + 1
@@ -47,6 +50,9 @@ POP_FOLDER = c4d.FIRST_POPUP_ID + 3
 TILE_MIN, TILE_MAX, TILE_STEP = 64, 320, 16
 CAPTION, GAP = 18, 8
 SIDEBAR_W, ROW_H = 190, 20
+
+BADGE_PEN = {"cc0": c4d.Vector(0.18, 0.55, 0.25), "by": c4d.Vector(0.75, 0.5, 0.1),
+             "nc": c4d.Vector(0.7, 0.15, 0.15), "other": c4d.Vector(0.35)}
 
 _bitmaps = collections.OrderedDict()   # asset key -> BaseBitmap, most recently drawn last
 MAX_BITMAPS = 1500                      # ~300 MB of 256px thumbnails; older ones reload when seen again
@@ -268,6 +274,14 @@ class Grid(gui.GeUserArea):
         self.cols = self._columns(self._w())
         self.Redraw()
 
+    def add_items(self, items):
+        """More results at the end (a search that pages); the view stays where it is."""
+        self.items.extend(items)
+        self.Redraw()
+
+    def near_end(self, rows=2):
+        return bool(self.items) and self.visible_range(extra_rows=rows)[1] >= len(self.items)
+
     def set_tile(self, size):
         first = (self.scroll // self.cell_h) * self.cols       # keep the top row in view
         self.tile = size
@@ -348,6 +362,22 @@ class Grid(gui.GeUserArea):
             if show_local and asset.key in d.local:
                 self.DrawSetPen(c4d.Vector(0.3, 0.8, 0.4))         # already in the library
                 self.DrawRectangle(x + T - 12, y + 4, x + T - 5, y + 11)
+            if asset.source in sources.MODELS and T >= 72:          # licence badge + face count
+                kind = asset.extra.get("kind", "other")
+                tag = sketchfab.BADGES.get(kind, "CHECK")
+                tw = self.DrawGetTextWidth(tag) + 8
+                self.DrawSetPen(BADGE_PEN.get(kind, BADGE_PEN["other"]))
+                self.DrawRectangle(x + 3, y + 3, x + 3 + tw, y + 3 + 15)
+                self.DrawSetTextCol(c4d.Vector(1.0), c4d.COLOR_TRANS)
+                self.DrawText(tag, x + 7, y + 3)
+                faces = sketchfab.faces_text(asset.extra.get("faces"))
+                if faces:
+                    faces += " faces" if T >= 112 else ""
+                    fw = self.DrawGetTextWidth(faces) + 8
+                    self.DrawSetPen(c4d.Vector(0.08))
+                    self.DrawRectangle(x + 3, y + T - 19, x + 3 + fw, y + T - 4)
+                    self.DrawSetTextCol(c4d.COLOR_TEXT, c4d.COLOR_TRANS)
+                    self.DrawText(faces, x + 7, y + T - 19)
             if show_source and T >= 96:                            # which site, in Everything
                 tag = sources.SOURCES[asset.source].label
                 tw = self.DrawGetTextWidth(tag) + 8
@@ -461,8 +491,12 @@ class BrowserDialog(gui.GeDialog):
         super(BrowserDialog, self).__init__()
         self.cfg = settings.load()
         self.library = libmod.Library(self.cfg["library"])
+        self.model_library = libmod.Library(self.cfg.get("model_library") or settings.DEFAULTS["model_library"])
         sources.SOURCES["installed"].library = self.library
-        self.jobs = jobsmod.Jobs(self.library)
+        sources.SOURCES["installed"].model_library = self.model_library
+        self.jobs = jobsmod.Jobs(self.library, model_library=self.model_library)
+        self.lib_info = {}          # library root -> its status text (count, network, read-only)
+        self.library_due_models = False
         tile = int(self.cfg.get("tile", 128))
         self.grid = Grid(self, max(TILE_MIN, min(TILE_MAX, tile)))
         self.cats = Categories(self)
@@ -487,6 +521,10 @@ class BrowserDialog(gui.GeDialog):
         self.res_options = []       # the Resolution menu's entries on this tab
         self.sizes = {}             # asset key -> sizes it really comes in (asked on selection)
         self.log_inputs = False     # Help > Log mouse wheel and keys
+        self.more_url = None        # the next page of a search that pages (Sketchfab)
+        self.loading_more = False
+        self.import_after_lookup = None   # uid of a pasted link: import it once it's found
+        self.search_typed = False   # the pending search_due came from typing
         if not isinstance(self.cfg.get("res"), dict):
             self.cfg["res"] = {}
 
@@ -497,12 +535,14 @@ class BrowserDialog(gui.GeDialog):
         self.MenuSubBegin("Library")
         self.MenuAddString(ID_MENU_FOLDER, "Choose library folder…")
         self.MenuAddString(ID_MENU_OPEN, "Open library folder")
+        self.MenuAddString(ID_MENU_MODELS, "Choose Sketchfab models folder…")
         self.MenuAddString(ID_MENU_REFRESH, "Reload the sites' catalogues and rescan the library")
         self.MenuAddSeparator()
         self.MenuAddString(ID_MENU_CHECK, "Check Redshift node IDs (prints to the Console)")
         self.MenuSubEnd()
         self.MenuSubBegin("Help")
         self.MenuAddString(ID_MENU_UPDATE, "Check for updates")
+        self.MenuAddString(ID_MENU_SFTOKEN, "Sketchfab API token…")
         self.MenuAddString(ID_MENU_TOKEN, "GitHub token (private repository)…")
         self.MenuAddString(ID_MENU_LOG, "Log mouse wheel and keys to the Console")
         self.MenuAddSeparator()
@@ -516,19 +556,20 @@ class BrowserDialog(gui.GeDialog):
         bc.SetBool(c4d.QUICKTAB_NOMULTISELECT, True)
         self.tabs = self.AddCustomGui(ID_TABS, c4d.CUSTOMGUI_QUICKTAB, "", c4d.BFH_SCALEFIT, 0, 0, bc)
 
-        if self.GroupBegin(0, c4d.BFH_SCALEFIT, cols=7, rows=1):
+        if self.GroupBegin(0, c4d.BFH_SCALEFIT, cols=8, rows=1):
             self.GroupBorderSpace(6, 4, 6, 2)
             self.AddEditText(ID_QUERY, c4d.BFH_SCALEFIT, 200)
             self.AddButton(ID_SEARCH, c4d.BFH_LEFT, name="Search")
+            self.AddButton(ID_PASTE, c4d.BFH_LEFT, name="Paste link")
             self.AddStaticText(0, c4d.BFH_LEFT, name=" Sort")
             self.AddComboBox(ID_SORT, c4d.BFH_LEFT, 100)
-            self.AddStaticText(0, c4d.BFH_LEFT, name=" Resolution")
+            self.AddStaticText(ID_RES_LABEL, c4d.BFH_LEFT, 70, name=" Resolution")
             self.AddComboBox(ID_RES, c4d.BFH_LEFT, 90)
         self.GroupEnd()
 
         if self.GroupBegin(0, c4d.BFH_SCALEFIT, cols=6, rows=1):
             self.GroupBorderSpace(6, 0, 6, 2)
-            self.AddStaticText(0, c4d.BFH_LEFT, name="Library")
+            self.AddStaticText(ID_LIB_LABEL, c4d.BFH_LEFT, 50, name="Library")
             self.AddEditText(ID_LIBRARY, c4d.BFH_SCALEFIT, 300)
             self.AddButton(ID_LIB_BROWSE, c4d.BFH_LEFT, 30, name="…")
             self.AddButton(ID_LIB_OPEN, c4d.BFH_LEFT, name="Open")
@@ -601,7 +642,18 @@ class BrowserDialog(gui.GeDialog):
         return self.res_options[i] if 0 <= i < len(self.res_options) else sources.HIGHEST
 
     def _fill_resolutions(self):
-        """Only the sizes this tab's site(s) offer, largest first, after "Highest"."""
+        """Only the sizes this tab's site(s) offer, largest first, after "Highest".
+        On a model tab the same menu is Max faces."""
+        self.SetString(ID_RES_LABEL, " Max faces" if self.tab in sources.MODELS else " Resolution")
+        if self.tab in sources.MODELS:
+            self.res_options = [label for label, n in sketchfab.FACES]
+            self.FreeChildren(ID_RES)
+            for n, label in enumerate(self.res_options):
+                self.AddChild(ID_RES, n, label)
+            saved = self.cfg.get("faces") or sketchfab.DEFAULT_FACES
+            self.SetInt32(ID_RES, self.res_options.index(saved) if saved in self.res_options else 0)
+            self.Enable(ID_RES, True)
+            return
         if self.tab == "installed":
             sizes = ()
         elif self.tab == "everything":
@@ -628,13 +680,38 @@ class BrowserDialog(gui.GeDialog):
     def _cat_key(self):
         return self.tab if self.tab != "everything" else "everything:" + ",".join(self.sites)
 
+    @property
+    def max_faces(self):
+        return dict(sketchfab.FACES).get(self.cfg.get("faces") or sketchfab.DEFAULT_FACES)
+
+    def _model_toggles(self):
+        return [("commercial", "Commercial use only", None, bool(self.cfg.get("sf_commercial"))),
+                ("staffpicked", "Staff picks only", None, bool(self.cfg.get("sf_staffpicked")))]
+
+    def _switch_tab(self, tid):
+        if tid == self.tab:
+            return
+        if self.tabs is not None:
+            for n, t in enumerate(sources.TABS):
+                self.tabs.Select(n, t == tid)
+        self.tab = tid
+        self._tab_changed(search=False)
+
     def _site_toggles(self):
         counts = sources.SOURCES["everything"].site_counts()
         on = self.sites
         return [(s, sources.SOURCES[s].label, counts.get(s), s in on) for s in sources.Everything.MEMBERS]
 
     def site_toggled(self, sid, solo=False):
-        """A site's tick box on the Everything tab. Ctrl-click: only that site (again: all)."""
+        """A site's tick box on the Everything tab. Ctrl-click: only that site (again: all).
+        On Sketchfab the boxes are its filters."""
+        if self.tab in sources.MODELS:
+            key = {"commercial": "sf_commercial", "staffpicked": "sf_staffpicked"}.get(sid)
+            if key:
+                self.cfg[key] = not self.cfg.get(key)
+                self.cats.set_toggles(self._model_toggles())
+                self.search()
+            return
         members = sources.Everything.MEMBERS
         on = list(self.sites)
         if solo:
@@ -686,8 +763,14 @@ class BrowserDialog(gui.GeDialog):
         self.Enable(ID_SORT, len(src.sorts) > 1)
         installed = self.tab == "installed"
         self._fill_resolutions()
+        self.SetString(ID_CREATE, "Import model" if self.tab in sources.MODELS else "Create material")
+        self._show_library_row()
+        if self.tab not in sources.MODELS and sketchfab.parse_uid(self.GetString(ID_QUERY)):
+            self.SetString(ID_QUERY, "")          # a Sketchfab link means nothing to the other tabs
         if installed:
             self.SetString(ID_LICENCE, "In the library folder — no download needed")
+        elif self.tab in sources.MODELS:
+            self.SetString(ID_LICENCE, src.licence)
         else:
             extra = ""
             if src.fixed_resolution:
@@ -695,7 +778,8 @@ class BrowserDialog(gui.GeDialog):
             elif self.tab != "everything":
                 extra = "  ·  up to %s" % src.resolutions[-1]
             self.SetString(ID_LICENCE, src.licence + extra)
-        self.cats.set_toggles(self._site_toggles() if self.tab == "everything" else [])
+        self.cats.set_toggles(self._site_toggles() if self.tab == "everything" else
+                              self._model_toggles() if self.tab in sources.MODELS else [])
         if installed:
             self._installed_categories()
             if self.scanned:
@@ -749,13 +833,16 @@ class BrowserDialog(gui.GeDialog):
         cfg["source"] = self.tab
         cfg["query"] = self.GetString(ID_QUERY)
         cfg["sort"][self.tab] = self._sort()
-        if self.res_options:
+        if self.tab in sources.MODELS:
+            cfg["faces"] = self.resolution
+        elif self.res_options:
             cfg["res"][self.tab] = self.resolution
         cfg["assign"] = self.GetBool(ID_ASSIGN)
         cfg["displacement"] = self.GetBool(ID_DISP)
         cfg["displacement_scale"] = self.GetFloat(ID_DISP_SCALE)
         cfg["bump_from_height"] = self.GetBool(ID_BUMP_HEIGHT)
         cfg["library"] = self.library.root
+        cfg["model_library"] = self.model_library.root
         cfg["tile"] = self.grid.tile
         settings.save(cfg)
 
@@ -778,9 +865,37 @@ class BrowserDialog(gui.GeDialog):
         self.cfg["tile"] = size
 
     # ---- the library folder ----------------------------------------------------------------------
-    def set_library(self, path, ask_unc=True):
+    def _lib(self, models=None):
+        """The folder the Library row is about: Sketchfab's models folder on its tab."""
+        models = self.tab in sources.MODELS if models is None else models
+        return self.model_library if models else self.library
+
+    def _show_library_row(self):
+        lib = self._lib()
+        self.SetString(ID_LIB_LABEL, "Models" if lib is self.model_library and self.tab in sources.MODELS else "Library")
+        self.SetString(ID_LIBRARY, lib.root)
+        self.SetString(ID_LIB_INFO, self.lib_info.get(lib.root, "reading…"))
+
+    def set_library(self, path, ask_unc=True, models=None):
         path = (path or "").strip().strip('"')
         if not path:
+            return
+        models = self.tab in sources.MODELS if models is None else models
+        if models:
+            unc = libmod.unc_path(path)
+            if unc and ask_unc and gui.QuestionDialog(
+                    "%s is the network share\n%s\n\nUse the network path, so the models' texture paths "
+                    "work on every PC (whatever drive letter they use)?" % (path[:2], unc[:len(unc) - len(path) + 2])):
+                path = unc
+            if os.path.normcase(path) != os.path.normcase(self.model_library.root):
+                self.model_library = libmod.Library(path)
+                self.jobs.model_library = self.model_library
+                sources.SOURCES["installed"].model_library = self.model_library
+                sources.SOURCES["installed"]._all = None
+                self.save()
+                self.jobs.scan()
+                self.status("Sketchfab models folder: " + path)
+            self._show_library_row()
             return
         unc = libmod.unc_path(path)
         if unc and ask_unc and gui.QuestionDialog(
@@ -809,26 +924,37 @@ class BrowserDialog(gui.GeDialog):
     def _scanned(self, entries, error):
         self.scanned = True
         self.local = self.library.index(entries)
-        lib = self.library
-        if error or not os.path.isdir(lib.root):
-            info = "not reachable" if not os.path.isdir(lib.root) else error
-        else:
-            shared = lib.root.startswith("\\\\") or bool(libmod.unc_path(lib.root))
-            info = "%d material%s%s%s" % (len(entries), "" if len(entries) == 1 else "s",
-                                          " · network" if shared else "",
-                                          "" if lib.writable() else " · read-only")
-        self.SetString(ID_LIB_INFO, info)
+        for lib, models in ((self.library, False), (self.model_library, True)):
+            if error or not os.path.isdir(lib.root):
+                info = "not reachable" if not os.path.isdir(lib.root) else error
+            else:
+                root = os.path.normcase(os.path.abspath(lib.root))
+                mine = [e for e in entries if os.path.normcase(os.path.abspath(e["folder"])).startswith(root)
+                        and (e.get("kind") == "model") == models]
+                what = "model" if models else "material"
+                shared = lib.root.startswith("\\\\") or bool(libmod.unc_path(lib.root))
+                info = "%d %s%s%s%s" % (len(mine), what, "" if len(mine) == 1 else "s",
+                                        " · network" if shared else "",
+                                        "" if lib.writable() else " · read-only")
+            self.lib_info[lib.root] = info
+        self._show_library_row()
         if self.tab == "installed":
             self._installed_categories()
             self.search()
         self.grid.Redraw()
 
     # ---- searching and endless scrolling -------------------------------------------------------
-    def search(self):
+    def search(self, typed=False):
+        """typed: the user searched (Search, or typing) - a Sketchfab link then goes
+        to the Sketchfab tab, whichever tab it was typed on."""
+        query = self.GetString(ID_QUERY).strip()
+        if typed and sketchfab.parse_uid(query) and self.tab not in sources.MODELS:
+            self._switch_tab("sketchfab")
         self.token += 1
         self.search_due = 0.0
         self.results = []
         self.searching = True
+        self.more_url, self.loading_more = None, False
         src = self.source
         if self.tab == "installed":
             self.empty_text = ("Nothing in the library yet — download something, or point Library at a "
@@ -840,12 +966,18 @@ class BrowserDialog(gui.GeDialog):
             self.empty_text = ("Loading every site's catalogue (first time today, a few seconds)…"
                                if self.tab == "everything" else
                                "Loading the %s catalogue (first time today)…" % src.label)
+        elif self.tab in sources.MODELS:
+            self.empty_text = ("Looking the model up on Sketchfab…" if sketchfab.parse_uid(query)
+                               else "Searching Sketchfab…")
         else:
             self.empty_text = "Searching…"
         self.grid.set_items([])
         self.SetString(ID_COUNT, "")
-        self.jobs.search(self.token, self.tab, self.GetString(ID_QUERY).strip(), self._sort(), self.category,
-                         self.sites)
+        extra = {}
+        if self.tab in sources.MODELS:
+            extra = {"max_faces": self.max_faces, "commercial": bool(self.cfg.get("sf_commercial")),
+                     "staffpicked": bool(self.cfg.get("sf_staffpicked"))}
+        self.jobs.search(self.token, self.tab, query, self._sort(), self.category, self.sites, **extra)
 
     def _search_result(self, token, assets, error):
         if token != self.token:
@@ -863,14 +995,131 @@ class BrowserDialog(gui.GeDialog):
                 self.status("Couldn't reach: " + ", ".join(failed))
         for a in assets:
             self.assets[a.key] = a
+        self.more_url = getattr(assets, "next", None)
         self.grid.set_items(assets)              # thumbnails load as tiles come into view
         self._count()
+        uid = self.import_after_lookup
+        if uid and self.tab in sources.MODELS:   # Paste link: import what the link points at
+            self.import_after_lookup = None
+            hit = next((i for i, a in enumerate(assets) if a.id == uid), None)
+            if hit is not None:
+                self.grid.selected = {hit}
+                self.grid.Redraw()
+                self.create([assets[hit]])
+        elif self.tab in sources.MODELS and len(assets) == 1 and sketchfab.parse_uid(self.GetString(ID_QUERY)):
+            self.grid.selected = {0}             # a link typed into the search: that model, selected
+            self.grid.Redraw()
+            self.selection_changed()
         if self._cat_key() not in self.cat_cache and self.tab != "installed":
             self._load_categories()               # (again, if it failed) - instant now the catalogue is loaded
 
     def _count(self):
         n = len(self.results)
-        self.SetString(ID_COUNT, "%d material%s" % (n, "" if n == 1 else "s"))
+        what = "model" if self.tab in sources.MODELS else "material"
+        self.SetString(ID_COUNT, "%d%s %s%s" % (n, "+" if self.more_url else "", what, "" if n == 1 else "s"))
+
+    def _more_result(self, token, page, error):
+        if token != self.token:
+            return
+        self.loading_more = False
+        if error:
+            self.status("Couldn't load more: " + error)
+            self.more_url = None
+            return
+        for a in page:
+            self.assets[a.key] = a
+        self.results.extend(page)
+        self.more_url = getattr(page, "next", None)
+        self.grid.add_items(page)
+        self._count()
+
+    def _maybe_more(self):
+        """Near the end of a search that pages: fetch the next page."""
+        if self.more_url and not self.loading_more and not self.searching and self.grid.near_end():
+            self.loading_more = True
+            self.jobs.more(self.token, self.tab, self.more_url, commercial=bool(self.cfg.get("sf_commercial")))
+
+    # ---- Sketchfab models -------------------------------------------------------------------------
+    def paste_link(self):
+        """Paste link: the Sketchfab model whose link is on the clipboard - found and imported."""
+        try:
+            text = c4d.GetStringFromClipboard() or ""
+        except Exception:
+            text = ""
+        uid = sketchfab.parse_uid(text)
+        if not uid:
+            self.status("No Sketchfab link on the clipboard - copy a model's address in your browser first.")
+            return
+        self.import_after_lookup = uid
+        self.SetString(ID_QUERY, text.strip())
+        self._switch_tab("sketchfab")
+        self.search()
+
+    def _ask_sketchfab_token(self, needed=False):
+        text = gui.InputDialog(("Downloading from Sketchfab needs your own API token.\n" if needed else "") +
+                               "Find it on sketchfab.com/settings/password (\"API Token\") and paste it here.\n"
+                               "It's kept in this PC's BasPBR Browser settings. Leave empty to remove it.",
+                               self.cfg.get("sketchfab_token", ""))
+        if text is None:
+            return None
+        self.cfg["sketchfab_token"] = text.strip()
+        self.save()
+        self.status("Sketchfab token %s." % ("saved" if text.strip() else "removed"))
+        return text.strip() or None
+
+    def _import_models(self, assets, payload):
+        token = self.cfg.get("sketchfab_token") or self._ask_sketchfab_token(needed=True)
+        if not token:
+            self.status("No Sketchfab token - Help > Sketchfab API token to add yours.")
+            return
+        nc = [a for a in assets if a.extra.get("kind") == "nc" and a.key not in self.local]
+        if nc and not gui.QuestionDialog(
+                "%s\n\n%s NOT for commercial work (%s).\nImport anyway?" % (
+                    "\n".join("  \u2022 " + a.name for a in nc[:8]), "This model is" if len(nc) == 1 else "These are",
+                    nc[0].extra.get("licence") or "non-commercial licence")):
+            assets = [a for a in assets if a not in nc]
+        queued = 0
+        for a in assets:
+            if self.jobs.download(a, None, dict(payload, token=token)):
+                self.state[a.key] = "queued"
+                queued += 1
+        self.grid.Redraw()
+        if queued:
+            self.status("Downloading %d model%s from Sketchfab…" % (queued, "" if queued == 1 else "s"))
+
+    def _model_ready(self, key, folder, info, scene, images, reused, asset, payload):
+        """A model on disk and read: build it into the scene (main thread)."""
+        self.state.pop(key, None)
+        name = info.get("name") or asset.name
+        doc = c4d.documents.GetActiveDocument()
+        doc.StartUndo()
+        try:
+            root, stats = c4dscene.build(doc, scene, name, images, (payload or {}).get("options"))
+            doc.SetActiveObject(root, c4d.SELECTION_NEW)
+        except Exception as exc:
+            traceback.print_exc()
+            self.state[key] = "error"
+            self.status("Couldn't build %s: %s" % (name, exc))
+            return
+        finally:
+            doc.EndUndo()
+            c4d.EventAdd()
+        if asset.source != "installed":
+            self.local.add(key)
+            sources.SOURCES["installed"]._all = None
+        bits = ["%s imported%s: %d object%s, %d material%s, %s polygons" % (
+            name, " from the library" if reused else "", stats["objects"], "" if stats["objects"] == 1 else "s",
+            stats["materials"], "" if stats["materials"] == 1 else "s", sketchfab.faces_text(stats["polygons"]) or "0")]
+        kind = sketchfab.licence_kind(info.get("licence"))
+        if kind == "by":
+            bits.append("credit %s (ATTRIBUTION.txt in the library)" % (info.get("author") or "the author"))
+        elif kind == "nc":
+            bits.append("NOT for commercial work")
+        if scene.warnings:
+            bits.append("; ".join(scene.warnings))
+        if stats["problems"]:
+            bits.append("%d Redshift port(s) skipped - see Console" % len(stats["problems"]))
+        self.status("  ·  ".join(bits))
 
     def category_changed(self, key):
         self.cfg.setdefault("category", {})[self.tab] = key
@@ -924,7 +1173,9 @@ class BrowserDialog(gui.GeDialog):
         sel = self.grid.selected_assets()
         if len(sel) == 1:
             a = sel[0]
-            if a.source == "installed":
+            if a.source in sources.MODELS:
+                self._describe_model(a)
+            elif a.source == "installed":
                 e = a.extra["entry"]
                 who = (" by " + e["downloaded_by"]) if e.get("downloaded_by") else ""
                 when = ("  ·  downloaded %s%s" % (e["downloaded"], who)) if e.get("downloaded") else ""
@@ -935,6 +1186,22 @@ class BrowserDialog(gui.GeDialog):
                     self.jobs.details(a)             # the sizes it really comes in
         elif sel:
             self.status("%d selected" % len(sel))
+
+    def _describe_model(self, a):
+        e = a.extra
+        bits = [a.name + ("  by " + e["author"] if e.get("author") else "")]
+        verdict = {"cc0": "no credit needed", "by": "credit the author", "nc": "not for commercial work"}
+        lic = e.get("licence") or "licence unknown"
+        bits.append(lic + (" (%s)" % verdict[e.get("kind")] if e.get("kind") in verdict else ""))
+        if e.get("faces"):
+            bits.append(sketchfab.faces_text(e["faces"]) + " faces")
+        if e.get("size"):
+            tex = (", %d textures up to %dK" % (e["textures"], (e.get("texture_res") or 0) // 1024)
+                   if e.get("textures") and e.get("texture_res") else "")
+            bits.append("%d MB%s" % (round(e["size"] / 1e6), tex))
+        if a.key in self.local:
+            bits.append("in library")
+        self.status("  ·  ".join(bits))
 
     def _describe(self, a):
         here = "  ·  in library" if a.key in self.local else ""
@@ -967,6 +1234,17 @@ class BrowserDialog(gui.GeDialog):
             self.status("Select a material first (double-click creates it straight away).")
             return
         payload = self._payload()
+        models = [a for a in assets if a.source in sources.MODELS]
+        if models:
+            return self._import_models(models, payload)
+        stored = [a for a in assets if a.source == "installed" and a.extra["entry"].get("kind") == "model"]
+        for a in stored:                              # models in the library: read, then built
+            self.state[a.key] = "queued"
+            self.jobs.load_model(a, payload)
+        assets = [a for a in assets if a not in stored]
+        if not assets:
+            self.grid.Redraw()
+            return
         if assets[0].source == "installed":          # already on disk: build right away
             built = 0
             for a in assets:
@@ -1074,12 +1352,17 @@ class BrowserDialog(gui.GeDialog):
     # ---- menus ---------------------------------------------------------------------------------
     def context_menu(self, asset):
         bc = c4d.BaseContainer()
-        bc.SetString(POP_CREATE, "Create material")
+        model = asset.source in sources.MODELS or (asset.source == "installed" and
+                                                   asset.extra["entry"].get("kind") == "model")
+        bc.SetString(POP_CREATE, "Import model" if model else "Create material")
         if asset.page_url:
-            bc.SetString(POP_PAGE, "Open web page")
+            bc.SetString(POP_PAGE, "Open on Sketchfab" if model else "Open web page")
         folder = None
         if asset.source == "installed":
             folder = asset.extra["entry"]["folder"]
+        elif asset.source in sources.MODELS:
+            found = self.model_library.find_model(asset) if asset.key in self.local else None
+            folder = found[0] if found else None
         elif asset.key in self.local:
             have = sorted(self.library.resolutions(asset), key=sources._res_value)
             folder = (self.library.asset_dir(asset, have[-1]) if have
@@ -1102,11 +1385,17 @@ class BrowserDialog(gui.GeDialog):
                 self.tab = tab
                 self._tab_changed()
         elif cid == ID_SEARCH:
-            self.search()
+            self.search(typed=True)
+        elif cid == ID_PASTE:
+            self.paste_link()
         elif cid == ID_QUERY:
             self.search_due = time.time() + 0.4      # search as you type, once typing pauses
+            self.search_typed = True
         elif cid == ID_SORT:
             self.cfg["sort"][self.tab] = self._sort()
+            self.search()
+        elif cid == ID_RES and self.tab in sources.MODELS:
+            self.cfg["faces"] = self.resolution
             self.search()
         elif cid == ID_RES:
             self.cfg["res"][self.tab] = self.resolution
@@ -1126,17 +1415,22 @@ class BrowserDialog(gui.GeDialog):
             self.status("Cancelled.")
         elif cid == ID_LIBRARY:
             self.library_due = time.time() + 1.2     # typed path: apply once typing pauses
-        elif cid in (ID_LIB_BROWSE, ID_MENU_FOLDER):
-            path = c4d.storage.LoadDialog(title="Material library folder (a network share works)",
-                                          flags=c4d.FILESELECT_DIRECTORY, def_path=self.library.root)
+            self.library_due_models = self.tab in sources.MODELS
+        elif cid in (ID_LIB_BROWSE, ID_MENU_FOLDER, ID_MENU_MODELS):
+            models = cid == ID_MENU_MODELS or (cid == ID_LIB_BROWSE and self.tab in sources.MODELS)
+            path = c4d.storage.LoadDialog(
+                title="Sketchfab models folder (a network share works)" if models else
+                "Material library folder (a network share works)",
+                flags=c4d.FILESELECT_DIRECTORY, def_path=self._lib(models).root)
             if path:
-                self.set_library(path)
+                self.set_library(path, models=models)
         elif cid in (ID_LIB_OPEN, ID_MENU_OPEN):
+            lib = self._lib(models=cid == ID_LIB_OPEN and self.tab in sources.MODELS)
             try:
-                os.makedirs(self.library.root, exist_ok=True)
-                c4d.storage.ShowInFinder(self.library.root, True)
+                os.makedirs(lib.root, exist_ok=True)
+                c4d.storage.ShowInFinder(lib.root, True)
             except OSError as exc:
-                self.status("Can't open the library: %s" % exc)
+                self.status("Can't open %s: %s" % (lib.root, exc))
         elif cid == ID_LIB_RESCAN:
             self.SetString(ID_LIB_INFO, "reading the library…")
             self.jobs.forget_thumbs()
@@ -1162,6 +1456,8 @@ class BrowserDialog(gui.GeDialog):
                 self.cfg["github_token"] = text.strip()
                 self.save()
                 self.status("GitHub token %s." % ("saved" if text.strip() else "removed"))
+        elif cid == ID_MENU_SFTOKEN:
+            self._ask_sketchfab_token()
         elif cid == ID_MENU_LOG:
             self.log_inputs = not self.log_inputs
             print("[BasPBR Browser] logging mouse wheel and keys: %s" % ("on" if self.log_inputs else "off"))
@@ -1176,16 +1472,18 @@ class BrowserDialog(gui.GeDialog):
     def Timer(self, msg):
         now = time.time()
         if self.search_due and now >= self.search_due:
-            self.search()
+            typed, self.search_typed = self.search_typed, False
+            self.search(typed=typed)
         if self.library_due and now >= self.library_due:
             self.library_due = 0.0
             typed = self.GetString(ID_LIBRARY).strip()
             if typed and os.path.isdir(typed):
-                self.set_library(typed, ask_unc=False)
+                self.set_library(typed, ask_unc=False, models=self.library_due_models)
             elif typed:
                 self.SetString(ID_LIB_INFO, "folder not found")
         if self.make_thumbs:
             self._make_thumb(*self.make_thumbs.pop(0))
+        self._maybe_more()
         redraw = False
         for _ in range(200):
             try:
@@ -1228,6 +1526,11 @@ class BrowserDialog(gui.GeDialog):
                 redraw = True
             elif kind == "details":
                 self._details(*item[1:])
+            elif kind == "more":
+                self._more_result(*item[1:])
+            elif kind == "model":
+                self._model_ready(*item[1:])
+                redraw = True
             elif kind == "update":
                 self._update_result(*item[1:])
             elif kind == "updated":

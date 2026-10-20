@@ -97,8 +97,8 @@ def get_text(url, data=None, headers=None):
     return get_bytes(url, data, headers).decode("utf-8", "replace")
 
 
-def get_json(url):
-    return json.loads(get_text(url))
+def get_json(url, headers=None):
+    return json.loads(get_text(url, headers=headers))
 
 
 def download(url, dest, progress=None, cancel=None, data=None, headers=None):

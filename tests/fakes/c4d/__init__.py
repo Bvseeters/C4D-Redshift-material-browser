@@ -7,6 +7,12 @@ TEXTURETAG_MATERIAL, TEXTURETAG_PROJECTION, TEXTURETAG_PROJECTION_UVW = 1010, 10
 FIRST_POPUP_ID, MOUSEPOS = 900000, -1
 IMAGERESULT_OK = 1
 EVENTS = []
+Onull, Opolygon, Oinstance, Tphong, Tpolygonselection = 5140, 5100, 5126, 5612, 5673
+CLIPBOARD = [""]
+
+
+def GetStringFromClipboard():
+    return CLIPBOARD[0]
 
 
 class Vector(object):
@@ -18,6 +24,23 @@ class Vector(object):
 
     def __truediv__(self, s):
         return Vector(self.x / s, self.y / s, self.z / s)
+
+    def __add__(self, o):
+        return Vector(self.x + o.x, self.y + o.y, self.z + o.z)
+
+    def __repr__(self):
+        return "Vector(%g, %g, %g)" % (self.x, self.y, self.z)
+
+
+class Matrix(object):
+    def __init__(self, off=None, v1=None, v2=None, v3=None):
+        self.off = off or Vector(0.0)
+        self.v1 = v1 or Vector(1.0, 0.0, 0.0)
+        self.v2 = v2 or Vector(0.0, 1.0, 0.0)
+        self.v3 = v3 or Vector(0.0, 0.0, 1.0)
+
+
+from .objects import BaseObject, BaseSelect, CPolygon, PolygonObject, SelectionTag, UVWTag  # noqa: E402,F401
 
 
 class BaseContainer(dict):

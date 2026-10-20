@@ -94,7 +94,7 @@ dlg = ns["BrowserCommand"]()._dialog()
 dlg.CreateLayout()
 dlg.InitValues()
 check([t[1] for t in dlg.tabs.tabs] == ["Everything", "ambientCG", "Poly Haven", "ShareTextures", "AMD GPUOpen",
-                                       "FreePBR", "Installed"], "tabs: Everything, 5 sites, Installed")
+                                       "FreePBR", "Sketchfab", "Installed"], "tabs: Everything, 5 sites, Sketchfab, Installed")
 
 
 print("\nsettings from 3.1:")
@@ -308,7 +308,8 @@ check(sources.choose_res(["1K", "2K", "4K"], "2K") == "2K" and sources.choose_re
 EXPECT = {"ambientcg": ["Highest", "16K", "12K", "8K", "4K", "2K", "1K"],
           "polyhaven": ["Highest", "16K", "8K", "4K", "2K", "1K"],
           "sharetextures": ["Highest", "4K", "2K", "1K"], "amd": ["Highest", "8K", "4K", "2K", "1K"],
-          "freepbr": ["2K"], "installed": []}
+          "freepbr": ["2K"], "installed": [],
+          "sketchfab": ["Any", "10K", "50K", "100K", "250K", "500K", "1M"]}
 for tid, want in EXPECT.items():
     switch(tid)
     check(dlg.res_options == want and dlg.enabled.get(ui.ID_RES) == (len(want) > 1),

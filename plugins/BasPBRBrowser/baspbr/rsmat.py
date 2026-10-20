@@ -17,9 +17,10 @@ and from C4D 2023 onwards:
     Texture (Height, raw) -> Displacement -> Output . displacement (optional)
     Standard Material . outcolor -> Output . surface
 
-When a material graph said more (a MapSet from AMD's MaterialX):
+When a material graph said more (a MapSet from AMD's MaterialX, or a glTF model):
     Texture (raw) -> Color Splitter . R/G/B/A -> Change Range (0..1 -> min..max)
-      -> refl_roughness / metalness   (the channel the graph names, remapped;
+      -> refl_roughness / metalness / opacity_color
+                                      (the channel the graph names, remapped;
                                        no Range when it's 0..1 already)
     a constant roughness / metalness / colour -> that port's value
     the authored tiling -> every Texture's Scale
@@ -296,7 +297,12 @@ def build(doc, name, maps, opts=None):
                 _connect(channel("orm", orm, 1, "ORM channels"), _port(std, STANDARD + ".refl_roughness", False, problems))
             if not has_metal:
                 _connect(channel("orm", orm, 2, "ORM channels"), _port(std, STANDARD + ".metalness", False, problems))
-        to_std("opacity", "Opacity", "opacity_color")
+        op = channels.get("opacity")
+        if op is not None and "opacity" in maps:          # one channel (a model's colour alpha)
+            _connect(remap(channel("opacity", "Opacity", op.index, "Alpha"), op.min, op.max, "Opacity"),
+                     _port(std, STANDARD + ".opacity_color", False, problems))
+        else:
+            to_std("opacity", "Opacity", "opacity_color")
         if to_std("emission", "Emission", "emission_color"):
             _set(_port(std, STANDARD + ".emission_weight", False, problems), 1.0)
 

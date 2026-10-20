@@ -4,6 +4,7 @@ import os
 
 DEFAULTS = {
     "library": os.path.join(os.path.expanduser("~"), "Documents", "Redshift Material Library"),
+    "model_library": os.path.join(os.path.expanduser("~"), "Documents", "Sketchfab Models"),
     "source": "everything",
     "query": "",
     "sort": {},                 # per source
@@ -16,6 +17,10 @@ DEFAULTS = {
     "sites_off": [],            # sites left out of the Everything tab
     "tile": 128,                # thumbnail size in pixels (Ctrl + mouse wheel)
     "github_token": "",         # only while the GitHub repository is private
+    "sketchfab_token": "",      # the user's own Sketchfab API token (needed to download models)
+    "faces": "50K",             # Sketchfab: largest face count to show
+    "sf_commercial": False,     # Sketchfab: hide models that aren't for commercial use
+    "sf_staffpicked": False,    # Sketchfab: staff picks only
 }
 
 

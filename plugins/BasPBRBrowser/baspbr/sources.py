@@ -762,7 +762,8 @@ class Installed(Source):
 
     def entries(self):
         if self._all is None:
-            self._all = self.library.scan() if self.library else []
+            from .library import scan_all
+            self._all = scan_all([self.library, getattr(self, "model_library", None)])
         return self._all
 
     def catalogue(self, refresh=False):
@@ -898,7 +899,10 @@ def _extract_with_graph(zpath, work):
 SOURCES ={s.id: s for s in (Everything(), AmbientCG(), PolyHaven(), FreePBR(), ShareTextures(), AMDMatLib(),
                               Installed())}
 ONLINE = ("ambientcg", "polyhaven", "sharetextures", "amd", "freepbr")
-TABS = ("everything",) + ONLINE + ("installed",)
+from . import sketchfab  # noqa: E402,F401  (registers the Sketchfab tab; it builds on the classes above)
+
+MODELS = ("sketchfab",)
+TABS = ("everything",) + ONLINE + MODELS + ("installed",)
 
 
 def fetch(library, asset, res, progress=lambda f: None, cancel=None, waiting=lambda holder: None):
@@ -929,23 +933,9 @@ def fetch(library, asset, res, progress=lambda f: None, cancel=None, waiting=lam
     if found:
         return found[0], found[1], True
 
-    deadline = time.time() + 20 * 60
-    while True:
-        have, holder = library.lock(asset, res)
-        if have:
-            break
-        waiting(holder)
-        while time.time() < deadline:
-            if cancel is not None and cancel.is_set():
-                raise net.Cancelled()
-            time.sleep(2.0)
-            found = library.find(asset, res)
-            if found:
-                return found[0], found[1], True
-            if not os.path.exists(library._lock_path(asset, res)):
-                break                                  # they gave up: our turn
-        else:
-            raise RuntimeError("%s has been downloading this for 20 minutes - try again later" % holder)
+    found = _claim(library, asset, res, lambda: library.find(asset, res), cancel, waiting)
+    if found:
+        return found[0], found[1], True
 
     work = library.staging()
     try:
@@ -956,6 +946,81 @@ def fetch(library, asset, res, progress=lambda f: None, cancel=None, waiting=lam
     finally:
         library.unlock(asset, res)
         shutil.rmtree(work, ignore_errors=True)
+
+
+def _claim(library, asset, res, find, cancel, waiting):
+    """Take the library's lock for asset at res. When another PC holds it, wait
+    (waiting(holder) is called) and return what they made (find()'s answer) once
+    it's there; None once the lock is ours."""
+    deadline = time.time() + 20 * 60
+    while True:
+        have, holder = library.lock(asset, res)
+        if have:
+            return None
+        waiting(holder)
+        while time.time() < deadline:
+            if cancel is not None and cancel.is_set():
+                raise net.Cancelled()
+            time.sleep(2.0)
+            found = find()
+            if found:
+                return found
+            if not os.path.exists(library._lock_path(asset, res)):
+                break                                  # they gave up: our turn
+        else:
+            raise RuntimeError("%s has been downloading this for 20 minutes - try again later" % holder)
+
+
+def fetch_model(library, asset, token, progress=lambda f: None, cancel=None, waiting=lambda holder: None):
+    """Download a model (Sketchfab) into the library, or reuse it. Returns
+    (folder, info, reused). The folder keeps the .glb, its textures as files
+    (Redshift reads them from there), a preview, ATTRIBUTION.txt and asset.json."""
+    from . import gltf, sketchfab
+    found = library.find_model(asset)
+    if found:
+        return found[0], found[1], True
+    found = _claim(library, asset, "MODEL", lambda: library.find_model(asset), cancel, waiting)
+    if found:
+        return found[0], found[1], True
+    work = library.staging()
+    try:
+        model = SOURCES[asset.source].download_model(asset, token, work, progress, cancel)
+        scene = gltf.load(model)                       # it has to read before it goes in the library
+        final = os.path.join(work, "asset")
+        os.makedirs(final, exist_ok=True)
+        if model.lower().endswith(".glb"):
+            shutil.move(model, os.path.join(final, "model.glb"))
+            rel = "model.glb"
+        else:                                          # a .gltf keeps its folder (.bin, images)
+            top = os.path.dirname(model)
+            shutil.move(top, os.path.join(final, "gltf"))
+            rel = "gltf/" + os.path.basename(model)
+        images = gltf.save_images(scene, os.path.join(final, "textures"))
+        preview = _preview(library, asset, work)
+        info = {"model": rel, "images": {str(i): "textures/" + fn for i, fn in images.items()},
+                "licence": asset.extra.get("licence", ""), "author": asset.extra.get("author", ""),
+                "author_url": asset.extra.get("author_url", ""), "faces": asset.extra.get("faces", 0),
+                "counts": scene.counts(), "warnings": scene.warnings}
+        if preview and image_kind(preview) in ("png", "jpg"):
+            fn = "preview." + image_kind(preview)
+            shutil.copyfile(preview, os.path.join(final, fn))
+            info["preview"] = fn
+        with open(os.path.join(final, "ATTRIBUTION.txt"), "w", encoding="utf-8") as f:
+            f.write(sketchfab.attribution(asset, time.strftime("%Y-%m-%d")))
+        folder, info = library.store_model(asset, final, info)
+        return folder, info, False
+    finally:
+        library.unlock(asset, "MODEL")
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def load_model(folder, info):
+    """(gltf.Scene, {image index: file}) for a model in the library."""
+    from . import gltf
+    scene = gltf.load(os.path.join(folder, info["model"]))
+    images = {int(k): os.path.join(folder, v) for k, v in (info.get("images") or {}).items()
+              if os.path.isfile(os.path.join(folder, v))}
+    return scene, images
 
 
 THUMB_HEADERS = {"Accept": "image/png,image/jpeg;q=0.9,*/*;q=0.1"}   # never WebP: C4D can't read it
