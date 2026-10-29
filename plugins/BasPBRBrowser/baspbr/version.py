@@ -4,13 +4,17 @@ To release an update: raise VERSION, add a line or two under NOTES, commit and
 push to BRANCH. Every PC with the plugin offers it the next time someone opens
 the browser after starting Cinema 4D.
 """
-VERSION = "3.4.0"
+VERSION = "3.4.1"
 
 REPO = "Bvseeters/C4D-Redshift-material-browser"
 BRANCH = "main"
 PLUGIN_DIR = "plugins/BasPBRBrowser"        # the plugin's folder inside the repository
 
 NOTES = {
+    "3.4.1": [
+        "If the browser can't load (e.g. after a Cinema 4D update), it still shows in the Extensions menu and says why",
+        "The Console names the Cinema 4D / Python version and folder it loaded from, and warns about a duplicate copy",
+    ],
     "3.4.0": [
         "Sketchfab tab: search Sketchfab's downloadable models, with licence badges (CC0 / CREDIT / NON-COMM) and face counts",
         "Paste link: copy a model's address in your browser, press Paste link - it's downloaded and imported",
